@@ -13,6 +13,7 @@ import { Context, Handler, PRIV, ForbiddenError, TokenModel, UserModel } from 'h
 // ---------------- 内部状态 ----------------
 let docModel: any; // document model
 let ipLockColl: any; // 记录 (contestDocId, uid) -> { ip, ua }
+let ipAttendColl: any; // 备用参赛记录 (contestId, uid)
 let db: any; // 原始数据库实例 (ctx.db)
 let indexesEnsured = false; // 索引一次性创建
 
@@ -28,7 +29,7 @@ interface IpLockRecord {
 }
 
 declare module 'hydrooj' {
-  interface Collections { ipcontrol_login: IpLockRecord; }
+  interface Collections { ipcontrol_login: IpLockRecord; ipcontrol_attend: { _id?: any; contestId: any; uid: number; createdAt: Date } }
 }
 
 // ---------------- 日志封装（始终输出） ----------------
@@ -114,26 +115,33 @@ async function verifyDuringContest(domainId: string, uid: number, ip: string, ua
   if (docModel && docIds.length) {
     try { attended = await docModel.getMultiStatus(domainId, docModel.TYPE_CONTEST, { uid, docId: { $in: docIds }, attend: 1 }).project({ docId: 1 }).toArray(); } catch (e) { err('getMultiStatus error', e); }
   }
-  log('verifyDuringContest status', { uid, contests: contests.map(c => c.docId?.toString?.()), attended: attended.map(a => a.docId?.toString?.()) });
+  const attendedStrSet = new Set(attended.map(a => a.docId?.toString?.()));
+  log('verifyDuringContest status', { uid, contests: contests.map(c => c.docId?.toString?.()), attended: Array.from(attendedStrSet) });
   const now = Date.now();
   for (const c of contests) {
     const beginTs = new Date(c.beginAt).getTime();
     const endTs = new Date(c.endAt).getTime();
     const inWindow = now >= beginTs && now <= endTs;
-    log('contestCheck', { docId: c.docId?.toString?.(), beginTs, endTs, now, inWindow });
+    const docIdStr = c.docId?.toString?.();
+    log('contestCheck', { docId: docIdStr, beginTs, endTs, now, inWindow });
     if (!inWindow) continue;
-    const isAttended = attended.find(a => a.docId?.toString?.() === c.docId?.toString?.());
-    if (!isAttended) { log('skip lock (not attended)', { uid, contest: c.docId?.toString?.() }); continue; }
+    let isAttended = attendedStrSet.has(docIdStr);
+    if (!isAttended && ipAttendColl) {
+      try {
+        const fallbackAttend = await ipAttendColl.findOne({ contestId: c.docId, uid });
+        if (fallbackAttend) { isAttended = true; log('fallbackAttend hit', { uid, contest: docIdStr }); }
+      } catch (e) { warn('fallbackAttend query failed', e); }
+    }
+    if (!isAttended) { log('skip lock (not attended)', { uid, contest: docIdStr }); continue; }
     const key = `${c.docId}:${uid}`;
     let rec: IpLockRecord | null = await ipLockColl.findOne({ _id: key });
     if (!rec) {
       const newRec: IpLockRecord = { _id: key, contestId: c.docId, uid, ip, ua, createdAt: new Date(), updatedAt: new Date() };
       try { await ipLockColl.insertOne(newRec); log('lock inserted', { key, ip, ua }); } catch (e) { err('lock insert failed', e); }
     } else if (rec.ip !== ip || rec.ua !== ua) {
-      log('reject ip/ua change', { contest: c.docId?.toString?.(), uid, oldIp: rec.ip, newIp: ip, oldUa: rec.ua, newUa: ua });
+      log('reject ip/ua change', { contest: docIdStr, uid, oldIp: rec.ip, newIp: ip, oldUa: rec.ua, newUa: ua });
       throw new ForbiddenError('IP/UA 与首次登录不一致，比赛已启用 IP 控制');
     } else {
-      // 可更新触发时间
       try { await ipLockColl.updateOne({ _id: key }, { $set: { updatedAt: new Date() } }); } catch {/* ignore */}
     }
   }
@@ -149,6 +157,9 @@ class ManageHandler extends Handler {
     let imported = 0;
     if (docModel && contest.docId !== undefined) {
       try { imported = await docModel.countStatus(domainIdParam, docModel.TYPE_CONTEST, { docId: contest.docId, attend: 1 }); } catch { /* ignore */ }
+    }
+    if (!imported && ipAttendColl && contest.docId !== undefined) {
+      try { imported = await ipAttendColl.countDocuments({ contestId: contest.docId }); } catch { /* ignore */ }
     }
     const beginAtStr = contest.beginAt ? new Date(contest.beginAt).toISOString().replace('T',' ').substring(0,19) : '';
     const endAtStr = contest.endAt ? new Date(contest.endAt).toISOString().replace('T',' ').substring(0,19) : '';
@@ -196,33 +207,34 @@ class ManageHandler extends Handler {
       if (docModel && contest.docId !== undefined) {
         for (const uid of list) {
           const attempts: any = { uid };
-          // 尝试使用 contest.docId
-            try {
-              await docModel.setStatus(domainIdParam, docModel.TYPE_CONTEST, contest.docId, uid, { attend: 1, subscribe: 1 } as any);
-              attempts.byDocId = 'ok';
-            } catch (e) { attempts.byDocId = 'err'; attempts.byDocIdErr = (e as any)?.message; }
-          // 如果 _id 与 docId 字符串不同，再尝试 _id
+          try {
+            await docModel.setStatus(domainIdParam, docModel.TYPE_CONTEST, contest.docId, uid, { attend: 1, subscribe: 1 } as any);
+            attempts.byDocId = 'ok';
+          } catch (e) { attempts.byDocId = 'err'; attempts.byDocIdErr = (e as any)?.message; }
           const docIdStr = contest.docId?.toString?.();
           const rawIdStr = contest._id?.toString?.();
-          if (rawIdStr && docIdStr && rawIdStr !== docIdStr) {
-            try {
-              await docModel.setStatus(domainIdParam, docModel.TYPE_CONTEST, contest._id, uid, { attend: 1, subscribe: 1 } as any);
-              attempts.byRawId = 'ok';
-            } catch (e) { attempts.byRawId = 'err'; attempts.byRawIdErr = (e as any)?.message; }
-          }
-          // 验证
+            if (rawIdStr && docIdStr && rawIdStr !== docIdStr) {
+              try {
+                await docModel.setStatus(domainIdParam, docModel.TYPE_CONTEST, contest._id, uid, { attend: 1, subscribe: 1 } as any);
+                attempts.byRawId = 'ok';
+              } catch (e) { attempts.byRawId = 'err'; attempts.byRawIdErr = (e as any)?.message; }
+            }
           try {
             const st = await docModel.getMultiStatus(domainIdParam, docModel.TYPE_CONTEST, { uid, docId: { $in: [contest.docId, contest._id] }, attend: 1 }).project({ docId:1 }).toArray();
             attempts.verifyCount = st.length;
           } catch (e) { attempts.verifyErr = (e as any)?.message; }
+          // 备用集合写入
+          if (ipAttendColl) {
+            try { await ipAttendColl.updateOne({ contestId: contest.docId, uid }, { $setOnInsert: { createdAt: new Date() } }, { upsert: true }); attempts.fallbackMark = 'ok'; } catch (e) { attempts.fallbackMark = 'err'; attempts.fallbackErr = (e as any)?.message; }
+          }
           results.push(attempts);
         }
       }
-      // 最终统计
       let importedActual = 0;
-      try {
-        if (docModel && contest.docId !== undefined) importedActual = await docModel.countStatus(domainIdParam, docModel.TYPE_CONTEST, { docId: contest.docId, attend: 1 });
-      } catch {}
+      try { if (docModel && contest.docId !== undefined) importedActual = await docModel.countStatus(domainIdParam, docModel.TYPE_CONTEST, { docId: contest.docId, attend: 1 }); } catch {}
+      if (!importedActual && ipAttendColl) {
+        try { importedActual = await ipAttendColl.countDocuments({ contestId: contest.docId }); } catch {}
+      }
       log('import uids', { contest: contest.docId, requested: list.length, results, importedActual });
       this.response.redirect = `/contest/${contestId}/ipcontrol`;
       return;
@@ -256,6 +268,7 @@ export async function apply(ctx: Context) {
   // 初始化 model & collection
   if (!docModel) docModel = (global as any).Hydro?.model?.document || (global as any).Hydro?.model?.doc || (global as any).Hydro?.model?.Document;
   if (!ipLockColl) { ipLockColl = ctx.db.collection('ipcontrol_login'); log('ipLock collection ready'); }
+  if (!ipAttendColl) { ipAttendColl = ctx.db.collection('ipcontrol_attend'); }
   if (!db) db = ctx.db;
   if (!indexesEnsured) {
     try {
@@ -263,6 +276,10 @@ export async function apply(ctx: Context) {
         ipLockColl,
         { key: { contestId: 1, uid: 1 }, name: 'contest_user' },
         { key: { createdAt: 1 }, name: 'createdAt' },
+      );
+      await ctx.db.ensureIndexes(
+        ipAttendColl,
+        { key: { contestId: 1, uid: 1 }, name: 'contest_user_unique', unique: false },
       );
       indexesEnsured = true;
     } catch (e) { err('ensureIndexes failed', e); }
