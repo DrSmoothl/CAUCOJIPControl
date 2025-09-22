@@ -269,7 +269,6 @@ export async function apply(ctx: Context) {
   if (!docModel) docModel = (global as any).Hydro?.model?.document || (global as any).Hydro?.model?.doc || (global as any).Hydro?.model?.Document;
   if (!ipLockColl) { ipLockColl = ctx.db.collection('ipcontrol_login'); log('ipLock collection ready'); }
   if (!ipAttendColl) { ipAttendColl = ctx.db.collection('ipcontrol_attend'); }
-  if (!db) db = ctx.db;
   if (!indexesEnsured) {
     try {
       await ctx.db.ensureIndexes(
@@ -290,11 +289,11 @@ export async function apply(ctx: Context) {
   ctx.Route('ipcontrol_contest_manage', '/contest/:contestId/ipcontrol', ManageHandler, PRIV.PRIV_EDIT_SYSTEM);
   log('route registered /contest/:contestId/ipcontrol');
 
-  // 登录前：阻止窗口内登录
-  ctx.on('handler/before/UserLogin#post', async (h: any) => {
+  const beforeLoginHandler = async (h: any) => {
+    log('beforeLoginHook hit', { uname: h.args?.uname, domainId: h.args?.domainId });
     const uname = h.args.uname;
     let udoc = await UserModel.getByEmail(h.args.domainId, uname) || await UserModel.getByUname(h.args.domainId, uname);
-    if (!udoc) return;
+    if (!udoc) { log('beforeLoginHook user not found'); return; }
     const domainId = h.args.domainId || 'system';
     try {
       const { block, reason } = await shouldBlockLogin(domainId, udoc._id);
@@ -304,14 +303,26 @@ export async function apply(ctx: Context) {
         throw new ForbiddenError(reason || '登录被 IP 控制策略阻止');
       }
     } catch (e) { err('before login hook error', e); throw e; }
-  });
+  };
 
-  // 登录后：锁定 / 校验 IP+UA
-  ctx.on('handler/after/UserLogin#post', async (h: any) => {
-    const uid = h.user?._id; if (!uid) return;
+  const afterLoginHandler = async (h: any) => {
+    const uid = h.user?._id; if (!uid) { log('afterLoginHook no uid'); return; }
     const domainId = h.args.domainId || 'system';
     const ip = firstIp(h.request.ip || h.request.headers['x-forwarded-for']);
     const ua = h.request.headers['user-agent'] || '';
+    log('afterLoginHook attempt lock', { uid, ip, ua, domainId });
     try { await verifyDuringContest(domainId, uid, ip, ua); } catch (e) { if (!(e instanceof ForbiddenError)) err('after login verify error', e); throw e; }
-  });
+  };
+
+  // 原始事件
+  ctx.on('handler/before/UserLogin#post', beforeLoginHandler);
+  ctx.on('handler/after/UserLogin#post', afterLoginHandler);
+  // 额外可能名称（容错）
+  ctx.on('handler/after/UserLogin', afterLoginHandler);
+  ctx.on('handler/after/user.login#post', afterLoginHandler);
+  ctx.on('handler/after/user.login', afterLoginHandler);
+  ctx.on('handler/before/UserLogin', beforeLoginHandler);
+  ctx.on('handler/before/user.login#post', beforeLoginHandler);
+  ctx.on('handler/before/user.login', beforeLoginHandler);
+  log('login hooks registered (multiple variants)');
 }
