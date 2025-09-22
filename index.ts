@@ -1,5 +1,4 @@
 import { Context, Handler, PRIV, ForbiddenError, TokenModel, UserModel } from 'hydrooj';
-import { ObjectId } from 'mongodb';
 
 // 延迟初始化引用
 let documentModel: any; // 在 apply 中赋值
@@ -30,9 +29,12 @@ interface IpLockDoc {
 }
 
 // 工具函数
+// 去掉对 mongodb 包的直接依赖，Hydro 环境未必为插件单独提供该模块。
+// 如果后续需要真正的 ObjectId，可考虑 (global as any).Hydro.db?.bson?.ObjectId 动态获取。
 function tryCastObjectId(id: any) {
   if (typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id)) {
-    try { return new ObjectId(id); } catch { return id; }
+    console.log('[IPControl] treat id as hex ObjectId string (no cast)', id);
+    return id; // 直接返回字符串，交给底层 model 自行处理
   }
   return id;
 }
