@@ -148,8 +148,21 @@ class ManageHandler extends Handler {
     }
     const beginAtStr = contest.beginAt ? new Date(contest.beginAt).toISOString().replace('T',' ').substring(0,19) : '';
     const endAtStr = contest.endAt ? new Date(contest.endAt).toISOString().replace('T',' ').substring(0,19) : '';
+    // 查询当前锁
+    let locks: any[] = [];
+    try {
+      if (contest.docId !== undefined) {
+        locks = await ipLockColl.find({ contestId: contest.docId }).sort({ updatedAt: -1 }).toArray();
+      }
+    } catch (e) { warn('query locks failed', e); }
+    const lockView = [] as any[];
+    for (const r of locks) {
+      const createdAtStr = r.createdAt ? new Date(r.createdAt).toISOString().replace('T',' ').substring(0,19) : '';
+      const updatedAtStr = r.updatedAt ? new Date(r.updatedAt).toISOString().replace('T',' ').substring(0,19) : '';
+      lockView.push({ uid: r.uid, ip: r.ip, ua: r.ua, createdAtStr, updatedAtStr });
+    }
     this.response.template = 'ipcontrol_contest_manage.html';
-    this.response.body = { contest, imported, beginAtStr, endAtStr };
+    this.response.body = { contest, imported, beginAtStr, endAtStr, locks: lockView };
   }
   async post(domainIdParam: string) {
     this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
@@ -187,6 +200,20 @@ class ManageHandler extends Handler {
     if (action === 'clear_locks') {
       await ipLockColl.deleteMany({ contestId: contest.docId });
       log('clear locks', { contest: contest.docId });
+      this.response.redirect = `/contest/${contestId}/ipcontrol`;
+      return;
+    }
+    if (action === 'unlock_lock') {
+      const uid = Number(this.request.body.uid);
+      if (!Number.isFinite(uid)) {
+        this.response.redirect = `/contest/${contestId}/ipcontrol`;
+        return;
+      }
+      const keyPrefix = `${contest.docId}:${uid}`;
+      try {
+        await ipLockColl.deleteOne({ _id: keyPrefix });
+        log('unlock single', { contest: contest.docId, uid });
+      } catch (e) { err('unlock single failed', e); }
       this.response.redirect = `/contest/${contestId}/ipcontrol`;
       return;
     }
