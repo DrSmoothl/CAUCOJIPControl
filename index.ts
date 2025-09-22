@@ -1072,10 +1072,33 @@ export function apply(ctx: Context) {
         }
         
         if (udoc) {
-            // 检查是否应该阻止登录
-            const { blocked, reason } = await ipControlModel.shouldBlockUserLogin(udoc._id);
-            if (blocked) {
-                throw new ForbiddenError(reason || '登录被阻止');
+            // 检查用户是否参加了任何启用IP控制的比赛
+            const userParticipatedContests = await db.collection('document.status').find({
+                uid: udoc._id,
+                docType: 30, // 比赛类型
+                attend: 1    // 已参加
+            }).toArray();
+
+            for (const participation of userParticipatedContests) {
+                const setting = await ipControlModel.getContestIPControl(participation.docId);
+                if (setting && setting.enabled) {
+                    // 检查比赛是否在锁定期
+                    const contest = await db.collection('document').findOne({
+                        _id: participation.docId,
+                        docType: 30
+                    });
+
+                    if (contest) {
+                        const now = new Date();
+                        const contestStart = new Date(contest.beginAt);
+                        const lockStartTime = new Date(contestStart.getTime() - (setting.preContestLockMinutes || 60) * 60 * 1000);
+
+                        // 如果当前时间在锁定期内（锁定开始到比赛开始），禁止登录
+                        if (now >= lockStartTime && now < contestStart) {
+                            throw new ForbiddenError(`比赛 "${contest.title}" 开始前${setting.preContestLockMinutes || 60}分钟内禁止登录，请在比赛开始后再次登录`);
+                        }
+                    }
+                }
             }
         }
     });
@@ -1107,19 +1130,46 @@ export function apply(ctx: Context) {
         const { tid: contestId } = that.args;
         const userId = that.user?._id;
         
+        // 获取IP控制设置并添加到模板数据中
+        const setting = await ipControlModel.getContestIPControl(contestId);
+        that.UiContext.setting = setting;
+        
         if (!userId) return; // 未登录用户跳过检查
         
-        // 检查比赛是否启用了IP控制
-        const setting = await ipControlModel.getContestIPControl(contestId);
         if (!setting || !setting.enabled) return; // 未启用IP控制跳过
         
         const ip = that.request.ip;
         const ua = that.request.headers['user-agent'] || '';
         
         // 检查是否在锁定期
-        const inLockPeriod = await ipControlModel.isContestInLockPeriod(contestId);
-        if (inLockPeriod) {
-            // 检查用户是否已经参加比赛
+        const contest = await db.collection('document').findOne({
+            _id: contestId,
+            docType: 30
+        });
+
+        if (contest) {
+            const now = new Date();
+            const contestStart = new Date(contest.beginAt);
+            const lockStartTime = new Date(contestStart.getTime() - (setting.preContestLockMinutes || 60) * 60 * 1000);
+
+            // 如果在锁定期内
+            if (now >= lockStartTime && now < contestStart) {
+                // 检查用户是否已经参加比赛
+                const participantStatus = await db.collection('document.status').findOne({
+                    uid: userId,
+                    docType: 30,
+                    docId: contestId,
+                    attend: 1
+                });
+                
+                if (participantStatus) {
+                    // 已参赛用户在锁定期被强制下线
+                    await ipControlModel.clearUserTokens(userId);
+                    throw new ForbiddenError(`比赛开始前${setting.preContestLockMinutes || 60}分钟内禁止访问比赛页面`);
+                }
+            }
+        
+            // 检查用户是否已参加比赛
             const participantStatus = await db.collection('document.status').findOne({
                 uid: userId,
                 docType: 30,
@@ -1127,75 +1177,61 @@ export function apply(ctx: Context) {
                 attend: 1
             });
             
-            if (participantStatus) {
-                // 已参赛用户在锁定期被强制下线
-                await ipControlModel.clearUserTokens(userId);
-                throw new ForbiddenError(`比赛开始前${setting.preContestLockMinutes || 60}分钟内禁止访问比赛页面`);
-            }
-        }
-        
-        // 检查用户是否已参加比赛
-        const participantStatus = await db.collection('document.status').findOne({
-            uid: userId,
-            docType: 30,
-            docId: contestId,
-            attend: 1
-        });
-        
-        if (participantStatus) {
-            // 检查IP一致性
-            let participant = await contestParticipantsColl.findOne({
-                contestId,
-                uid: userId
-            });
-            
-            if (participant && participant.firstLoginIP) {
-                // 检查IP和UA一致性
-                const ipMatches = participant.firstLoginIP === ip;
-                const uaMatches = setting.strictMode ? participant.firstLoginUA === ua : true;
+            if (participantStatus && now >= contestStart) {
+                // 检查IP一致性
+                let participant = await contestParticipantsColl.findOne({
+                    contestId,
+                    uid: userId
+                });
                 
-                if (!ipMatches || !uaMatches) {
-                    // 记录违规
-                    await ipControlModel.recordViolation(userId, contestId, ip, ua, {
-                        originalIP: participant.firstLoginIP,
-                        originalUA: participant.firstLoginUA,
-                        currentIP: ip,
-                        currentUA: ua,
-                        reason: !ipMatches ? 'IP_CHANGE' : 'UA_CHANGE'
-                    });
+                if (participant && participant.firstLoginIP) {
+                    // 检查IP和UA一致性
+                    const ipMatches = participant.firstLoginIP === ip;
+                    const uaMatches = setting.strictMode ? participant.firstLoginUA === ua : true;
                     
-                    // 清除登录状态
-                    await ipControlModel.clearUserTokens(userId);
-                    
-                    const reason = !ipMatches ? 
-                        `IP地址已变更，原IP: ${participant.firstLoginIP}，当前IP: ${ip}` :
-                        `浏览器环境已变更，请使用原始设备访问`;
-                    
-                    throw new ForbiddenError(`检测到设备变更，${reason}`);
-                }
-                
-                // 更新最后登录时间和次数
-                await contestParticipantsColl.updateOne(
-                    { contestId, uid: userId },
-                    { 
-                        $set: { lastLoginAt: new Date() },
-                        $inc: { loginCount: 1 }
+                    if (!ipMatches || !uaMatches) {
+                        // 记录违规
+                        await ipControlModel.recordViolation(userId, contestId, ip, ua, {
+                            originalIP: participant.firstLoginIP,
+                            originalUA: participant.firstLoginUA,
+                            currentIP: ip,
+                            currentUA: ua,
+                            reason: !ipMatches ? 'IP_CHANGE' : 'UA_CHANGE'
+                        });
+                        
+                        // 清除登录状态
+                        await ipControlModel.clearUserTokens(userId);
+                        
+                        const reason = !ipMatches ? 
+                            `IP地址已变更，原IP: ${participant.firstLoginIP}，当前IP: ${ip}` :
+                            `浏览器环境已变更，请使用原始设备访问`;
+                        
+                        throw new ForbiddenError(`检测到设备变更，${reason}`);
                     }
-                );
-            } else if (participant) {
-                // 首次访问，记录IP和UA
-                await contestParticipantsColl.updateOne(
-                    { contestId, uid: userId },
-                    { 
-                        $set: {
-                            firstLoginIP: ip,
-                            firstLoginUA: ua,
-                            firstLoginAt: new Date(),
-                            lastLoginAt: new Date(),
-                            loginCount: 1
+                    
+                    // 更新最后登录时间和次数
+                    await contestParticipantsColl.updateOne(
+                        { contestId, uid: userId },
+                        { 
+                            $set: { lastLoginAt: new Date() },
+                            $inc: { loginCount: 1 }
                         }
-                    }
-                );
+                    );
+                } else if (participant) {
+                    // 首次访问，记录IP和UA
+                    await contestParticipantsColl.updateOne(
+                        { contestId, uid: userId },
+                        { 
+                            $set: {
+                                firstLoginIP: ip,
+                                firstLoginUA: ua,
+                                firstLoginAt: new Date(),
+                                lastLoginAt: new Date(),
+                                loginCount: 1
+                            }
+                        }
+                    );
+                }
             }
         }
     });
@@ -1208,47 +1244,89 @@ export function apply(ctx: Context) {
         // 检查比赛是否启用了IP控制
         const setting = await ipControlModel.getContestIPControl(contestId);
         if (setting && setting.enabled) {
-            // 如果启用了IP控制，检查用户是否在强制参赛列表中
-            const forcedParticipant = await contestParticipantsColl.findOne({
-                contestId,
-                uid: userId,
-                forced: true
+            // 获取比赛信息
+            const contest = await db.collection('document').findOne({
+                _id: contestId,
+                docType: 30
             });
-            
-            if (!forcedParticipant) {
-                throw new ForbiddenError('此比赛启用了IP控制，只有被管理员添加的用户才能参加');
+
+            if (contest) {
+                const now = new Date();
+                const contestStart = new Date(contest.beginAt);
+
+                // 如果比赛已经开始，禁止新用户加入
+                if (now >= contestStart) {
+                    throw new ForbiddenError('比赛已开始，启用IP控制的比赛不允许比赛开始后加入');
+                }
+
+                // 检查用户是否在强制参赛列表中（如果需要强制参赛功能）
+                const forcedParticipant = await contestParticipantsColl.findOne({
+                    contestId,
+                    uid: userId,
+                    forced: true
+                });
+                
+                // 如果设置了强制参赛且用户不在列表中，则拒绝
+                // 这里可以根据需要调整逻辑，暂时允许所有用户在比赛开始前加入
+                // if (!forcedParticipant) {
+                //     throw new ForbiddenError('此比赛启用了IP控制，只有被管理员添加的用户才能参加');
+                // }
             }
         }
     });
 
-    // 定时任务：清理过期的登录状态
+    // 定时任务：管理IP控制的锁定期和用户状态
     setTimeout(async () => {
         setInterval(async () => {
             try {
                 // 获取所有启用IP控制的比赛
-                const ipControlContests = await ipControlModel.getIPControlContests();
+                const ipControlSettings = await ipControlSettingsColl.find({ enabled: true }).toArray();
                 
-                for (const { contestId, setting } of ipControlContests) {
-                    const inLockPeriod = await ipControlModel.isContestInLockPeriod(contestId);
-                    
-                    if (inLockPeriod) {
-                        // 在锁定期内，清除所有参赛用户的登录状态
+                for (const setting of ipControlSettings) {
+                    const contest = await db.collection('document').findOne({
+                        _id: setting.contestId,
+                        docType: 30
+                    });
+
+                    if (!contest) continue;
+
+                    const now = new Date();
+                    const contestStart = new Date(contest.beginAt);
+                    const contestEnd = new Date(contest.endAt);
+                    const lockStartTime = new Date(contestStart.getTime() - (setting.preContestLockMinutes || 60) * 60 * 1000);
+
+                    // 检查是否刚进入锁定期（在锁定开始后的1分钟内）
+                    const timeSinceLockStart = now.getTime() - lockStartTime.getTime();
+                    const justEnteredLockPeriod = timeSinceLockStart >= 0 && timeSinceLockStart <= 5 * 60 * 1000; // 5分钟内算作刚进入
+
+                    if (justEnteredLockPeriod && now < contestStart) {
+                        console.log(`比赛 ${contest.title} 进入锁定期，清除所有参赛用户的登录状态`);
+                        
+                        // 获取所有参赛用户
                         const participants = await db.collection('document.status').find({
                             docType: 30,
-                            docId: contestId,
+                            docId: setting.contestId,
                             attend: 1
                         }).toArray();
                         
+                        // 清除所有参赛用户的token
                         for (const participant of participants) {
                             await ipControlModel.clearUserTokens(participant.uid);
+                            console.log(`清除用户 ${participant.uid} 的登录状态`);
                         }
+                    }
+
+                    // 在比赛进行期间，继续检查IP一致性
+                    if (now >= contestStart && now <= contestEnd) {
+                        // 这里可以添加额外的实时检查逻辑
+                        // 例如检查已登录用户的IP是否发生变化
                     }
                 }
             } catch (error) {
                 console.error('IP控制定时任务执行失败:', error);
             }
-        }, 5 * 60 * 1000); // 每5分钟执行一次
-    }, 10000); // 10秒后开始执行
+        }, 1 * 60 * 1000); // 每1分钟执行一次，提高响应性
+    }, 5000); // 5秒后开始执行
 
     // 添加导航菜单
     ctx.inject(['ui'], (c) => {

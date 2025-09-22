@@ -8,7 +8,7 @@
 <div class="row">
   <div class="medium-9 columns">
     <div class="section">
-      <div class="section__header" style="align: center">
+      <div class="section__header">
         <h1 class="section__title">{{ tdoc.title }}</h1>
       </div>
       <div class="section__body">
@@ -22,9 +22,9 @@
           <span class="bp5-tag bp5-large bp5-minimal problem__tag-item icon icon-check">{{ _('Attended') }}</span>
         {% endif %}
         
-        {% if tdoc.userBindPermission and tdoc.userBindPermission.enabled %}
+        {% if setting and setting.enabled %}
           <span class="bp5-tag bp5-large bp5-minimal problem__tag-item ipcontrol-security-tag">
-            <i class="icon icon-security"></i> {{ _('IP Control Enabled') }}
+            <i class="icon icon-security"></i> IP控制已启用
           </span>
         {% endif %}
       </div>
@@ -42,14 +42,19 @@
           <p>{{ _('The contest is a flexible time contest. You need to complete the contest within a specified time after you attended.') }}</p>
         </blockquote>
       {% endif %}
-      {% if tdoc.userBindPermission and tdoc.userBindPermission.enabled %}
+      {% if setting and setting.enabled %}
         <blockquote class="warn">
-          <p><strong>{{ _('IP Control Notice') }}:</strong></p>
+          <p><strong>IP控制通知:</strong></p>
           <ul>
-            <li>{{ _('This contest has IP control enabled') }}</li>
-            <li>{{ _('Login will be restricted 1 hour before the contest starts') }}</li>
-            <li>{{ _('During the contest, you must use the same IP address and browser as your first login') }}</li>
-            <li>{{ _('Any login attempt from different IP/browser will be blocked') }}</li>
+            <li>此比赛已启用IP控制</li>
+            <li>比赛开始前{{ setting.preContestLockMinutes || 60 }}分钟内将禁止登录</li>
+            <li>比赛期间，您必须使用与首次登录相同的IP地址和浏览器</li>
+            <li>任何来自不同IP/浏览器的登录尝试都将被阻止</li>
+            {% if setting.strictMode %}
+            <li>严格模式：将同时检查IP地址和浏览器指纹</li>
+            {% else %}
+            <li>宽松模式：仅检查IP地址</li>
+            {% endif %}
           </ul>
         </blockquote>
       {% endif %}
