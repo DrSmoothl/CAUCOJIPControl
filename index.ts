@@ -111,7 +111,8 @@ const ipControlModel = {
         const userContests = await db.collection('document.status').find({
             uid,
             docType: 30, // 比赛类型
-            attend: 1
+            attend: 1,
+            domainId: 'system'
         }).toArray();
 
         console.log(`[IPControl] getUserIPControlContests: 用户 ${uid} 参加的比赛:`, userContests.map(c => c.docId));
@@ -465,7 +466,8 @@ const ipControlModel = {
                 const existingStatus = await db.collection('document.status').findOne({
                     docType: 30,
                     uid,
-                    docId: contestId
+                    docId: contestId,
+                    domainId: 'system'
                 });
 
                 if (!existingStatus) {
@@ -615,7 +617,8 @@ const ipControlModel = {
         const statusResult = await db.collection('document.status').deleteOne({
             docType: 30,
             uid,
-            docId: contestId
+            docId: contestId,
+            domainId: 'system'
         });
 
         // 如果成功移除状态，更新比赛参与人数
@@ -1113,7 +1116,8 @@ export function apply(ctx: Context) {
             const userParticipatedContests = await db.collection('document.status').find({
                 uid: udoc._id,
                 docType: 30, // 比赛类型
-                attend: 1    // 已参加
+                attend: 1,   // 已参加
+                domainId: 'system' // 域ID
             }).toArray();
 
             console.log(`[IP控制] 用户 ${udoc._id} 参加的比赛:`, userParticipatedContests.map(p => p.docId));
@@ -1307,7 +1311,8 @@ export function apply(ctx: Context) {
                     uid: userId,
                     docType: 30,
                     docId: contestId,
-                    attend: 1
+                    attend: 1,
+                    domainId: 'system'
                 });
                 
                 console.log(`[IP控制] 用户 ${userId} 参赛状态:`, participantStatus);
@@ -1325,7 +1330,8 @@ export function apply(ctx: Context) {
                 uid: userId,
                 docType: 30,
                 docId: contestId,
-                attend: 1
+                attend: 1,
+                domainId: 'system'
             });
             
             console.log(`[IP控制] 用户 ${userId} 参赛状态:`, participantStatus);
@@ -1515,7 +1521,8 @@ export function apply(ctx: Context) {
                     uid: userId,
                     docType: 30,
                     docId: contest._id,
-                    attend: 1
+                    attend: 1,
+                    domainId: 'system'
                 });
                 
                 if (participantStatus) {
@@ -1604,7 +1611,8 @@ export function apply(ctx: Context) {
                         const participants = await db.collection('document.status').find({
                             docType: 30,
                             docId: setting.contestId,
-                            attend: 1
+                            attend: 1,
+                            domainId: 'system'
                         }).toArray();
                         
                         // 清除所有参赛用户的token
