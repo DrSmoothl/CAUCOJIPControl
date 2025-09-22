@@ -146,8 +146,10 @@ class ManageHandler extends Handler {
     if (docModel && contest.docId !== undefined) {
       try { imported = await docModel.countStatus(domainIdParam, docModel.TYPE_CONTEST, { docId: contest.docId, attend: 1 }); } catch { /* ignore */ }
     }
+    const beginAtStr = contest.beginAt ? new Date(contest.beginAt).toISOString().replace('T',' ').substring(0,19) : '';
+    const endAtStr = contest.endAt ? new Date(contest.endAt).toISOString().replace('T',' ').substring(0,19) : '';
     this.response.template = 'ipcontrol_contest_manage.html';
-    this.response.body = { contest, imported };
+    this.response.body = { contest, imported, beginAtStr, endAtStr };
   }
   async post(domainIdParam: string) {
     this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
