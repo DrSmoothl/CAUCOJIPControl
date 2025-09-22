@@ -1,214 +1,188 @@
 import { Context, Handler, PRIV, ForbiddenError, TokenModel, UserModel } from 'hydrooj';
 
-// 延迟初始化引用
-let documentModel: any; // 在 apply 中赋值
-let ipLockColl: any;    // 在 apply 中赋值
-let db: any;            // 保存 ctx.db 引用用于回退原始查询
-let ipLockIndexesEnsured = false;
+/**
+ * IP Control 插件（重写版）
+ * 功能：
+ * 1. 比赛开关：contest.ipControlEnabled
+ * 2. 比赛开始前 1 小时阻止已报名用户登录（并清除其 token）
+ * 3. 比赛进行中首次登录绑定 IP+UA，后续变更拒绝
+ * 4. 管理页面：开启/关闭、导入 UID 参赛、清除锁
+ * 5. 仅影响已报名且开启了 IP 控制的未结束比赛
+ */
 
-// 简单日志（通过环境变量 IPCONTROL_LOG 启用）
-const IPC_LOG_ENABLED = process.env.IPCONTROL_LOG === '1';
-function iplog(...args: any[]) { if (IPC_LOG_ENABLED) console.log('[IPControl]', ...args); }
+// ---------------- 内部状态 ----------------
+let docModel: any; // document model
+let ipLockColl: any; // 记录 (contestDocId, uid) -> { ip, ua }
+let db: any; // 原始数据库实例 (ctx.db)
+let indexesEnsured = false; // 索引一次性创建
 
-// 扩展 hydrooj 集合类型
-declare module 'hydrooj' {
-  interface Collections {
-    ipcontrol_login: IpLockDoc;
-  }
-}
-
-// ipLockColl 将在 apply(ctx) 中通过 ctx.db.collection 获取
-
-interface IpLockDoc {
-  _id?: string;          // contestId + ':' + uid
-  contestId: any;        // contest docId
-  uid: number;           // 用户 ID
-  ip: string;            // 记录的首登 IP
-  ua: string;            // 记录的首登 UA
+// ---------------- 类型声明 ----------------
+interface IpLockRecord {
+  _id: string; // `${contestDocId}:${uid}`
+  contestId: any; // contest docId (文档内部 id，不一定是字符串)
+  uid: number;
+  ip: string;
+  ua: string;
   createdAt: Date;
   updatedAt: Date;
 }
 
-// 工具函数
-// 去掉对 mongodb 包的直接依赖，Hydro 环境未必为插件单独提供该模块。
-// 如果后续需要真正的 ObjectId，可考虑 (global as any).Hydro.db?.bson?.ObjectId 动态获取。
-function tryCastObjectId(id: any) {
-  if (typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id)) {
-    console.log('[IPControl] treat id as hex ObjectId string (no cast)', id);
-    return id; // 直接返回字符串，交给底层 model 自行处理
-  }
-  return id;
+declare module 'hydrooj' {
+  interface Collections { ipcontrol_login: IpLockRecord; }
 }
 
-async function getContest(domainId: string, contestId: any) {
-  if (!documentModel) {
-    console.log('[IPControl] getContest: documentModel not ready');
-    return null;
-  }
-  const normalizeDomainId = (d: any) => (typeof d === 'string' ? d : (d?.domainId || 'system'));
-  const domainIdStr = normalizeDomainId(domainId as any);
-  const original = contestId;
-  const casted = tryCastObjectId(contestId);
-  console.log('[IPControl] getContest start', { domainIdParam: domainId, domainIdStr, original: String(original), casted: casted?.toString?.() });
-  let found = await documentModel.get(domainIdStr, documentModel.TYPE_CONTEST, casted);
-  if (!found && casted !== original) {
-    console.log('[IPControl] retry with original id (cast differed)');
-    found = await documentModel.get(domainIdStr, documentModel.TYPE_CONTEST, original);
-  }
-  // 回退 1：直接在 document 集合按 _id 查找 (hex 24)
-  if (!found && typeof original === 'string' && /^[0-9a-fA-F]{24}$/.test(original) && db) {
-    try {
-      const OID = (global as any).Hydro?.db?.bson?.ObjectId;
-      const oidVal = OID ? new OID(original) : original;
-      // 先带 type 过滤
-      let raw = await db.collection('document').findOne({ _id: oidVal, type: documentModel.TYPE_CONTEST });
-      if (!raw) {
-        // 去掉 type 再试（不同版本结构差异）
-        raw = await db.collection('document').findOne({ _id: oidVal });
-      }
-      if (!raw && typeof oidVal === 'object' && oidVal) {
-        // 试字符串形式
-        raw = await db.collection('document').findOne({ _id: original });
-      }
-      if (raw) {
-        console.log('[IPControl] fallback raw _id match found', { keys: Object.keys(raw), type: raw.type, docId: raw.docId, _id: raw._id?.toString?.(), title: raw.title });
-        found = raw;
-      } else {
-        console.log('[IPControl] fallback raw _id match not found');
-      }
-    } catch (e) {
-      console.log('[IPControl] fallback raw _id query error', e);
+// ---------------- 日志封装（始终输出） ----------------
+const log = (...a: any[]) => console.log('[IPControl]', ...a);
+const warn = (...a: any[]) => console.warn('[IPControl][WARN]', ...a);
+const err = (...a: any[]) => console.error('[IPControl][ERR]', ...a);
+
+// ---------------- 工具函数 ----------------
+function normalizeDomainId(d: any): string { return typeof d === 'string' ? d : (d?.domainId || 'system'); }
+function firstIp(raw?: string): string { if (!raw) return ''; const part = raw.split(',')[0].trim(); return part.includes(':') ? part.split(':')[0] : part; }
+
+// ================== 采用生产已验证的比赛获取策略 ==================
+// 与 CAUCOJUserBind 保持一致：
+// 1) document.findOne({_id: contestId, docType:30})
+// 2) 如果失败，加载所有 docType:30，字符串匹配 _id
+// 不再使用 docModel.get / 其他集合回退，确保行为一致性。
+async function fetchContest(_domainIdInput: string | any, contestId: any) {
+  if (!db) return null;
+  const documentColl = db.collection('document');
+  let contest: any = null;
+  try {
+    contest = await documentColl.findOne({ _id: contestId, docType: 30 });
+    if (contest) {
+      log('fetchContest direct match', { _id: contest._id?.toString?.(), docId: contest.docId });
+      return contest;
     }
+  } catch (e) {
+    warn('fetchContest direct query error', e);
   }
-  // 回退 2：若 id 是纯数字，尝试数字 docId
-  if (!found && typeof original === 'string' && /^\d+$/.test(original)) {
-    const numId = Number(original);
-    try {
-      console.log('[IPControl] retry numeric docId', numId);
-      found = await documentModel.get(domainIdStr, documentModel.TYPE_CONTEST, numId);
-    } catch (e) {
-      console.log('[IPControl] numeric docId query error', e);
+  try {
+    const all = await documentColl.find({ docType: 30 }).toArray();
+    contest = all.find(c => c._id?.toString?.() === contestId?.toString?.());
+    if (contest) {
+      log('fetchContest fallback list match', { _id: contest._id?.toString?.(), docId: contest.docId });
+      return contest;
     }
+    warn('fetchContest not found (docType=30)', { contestId });
+  } catch (e) {
+    err('fetchContest fallback error', e);
   }
-  if (!found) console.log('[IPControl] getContest not found', { domainIdStr, contestId: String(casted) });
-  if (!found && db) {
-    try {
-      const sample = await db.collection('document')
-        .find({ type: documentModel.TYPE_CONTEST })
-        .project({ _id: 1, docId: 1, title: 1 })
-        .limit(5).toArray();
-      console.log('[IPControl] contest sample (first 5)', sample.map(x => ({ _id: x._id?.toString?.(), docId: x.docId, title: x.title })));
-    } catch (e) {
-      console.log('[IPControl] sample query error', e);
-    }
-  }
-  else console.log('[IPControl] getContest success', { domainIdStr, _id: found._id?.toString?.(), docId: found.docId?.toString?.(), title: found.title, beginAt: found.beginAt, endAt: found.endAt, ipControlEnabled: found.ipControlEnabled });
-  return found;
+  return null;
 }
 
-async function listActiveIpControlContests(domainId: string) {
-  if (!documentModel) return [];
+async function listActive(domainId: string) {
+  if (!db) return [];
+  const documentColl = db.collection('document');
   const now = new Date();
-  return await documentModel.getMulti(
-    domainId,
-    documentModel.TYPE_CONTEST,
-    { ipControlEnabled: true, endAt: { $gt: now } },
-  ).toArray();
+  try {
+    // 只筛选已开启 ipControlEnabled 且未结束的比赛 (docType=30)
+    const list = await documentColl.find({ docType: 30, ipControlEnabled: true, endAt: { $gt: now } }).toArray();
+    return list;
+  } catch (e) { err('listActive error', e); return []; }
 }
 
-// 解析请求 IP
-function normIp(raw?: string): string {
-  if (!raw) return '';
-  // 可能是 x-forwarded-for 多个逗号
-  const first = raw.split(',')[0].trim();
-  return first.includes(':') ? first.split(':')[0] : first; // 去掉端口
-}
-
-// 登录限制逻辑
-async function shouldBlockLogin(domainId: string, uid: number): Promise<{ block: boolean; reason?: string }> {
-  if (!documentModel) return { block: false };
-  const contests = await listActiveIpControlContests(domainId);
+async function shouldBlockLogin(domainId: string, uid: number) {
+  const contests = await listActive(domainId);
   if (!contests.length) return { block: false };
-  const now = Date.now();
-  const contestIds = contests.map(c => c.docId);
-  const attended = await documentModel.getMultiStatus(domainId, documentModel.TYPE_CONTEST, { uid, docId: { $in: contestIds }, attend: 1 }).project({ docId: 1 }).toArray();
+  const docIds = contests.map(c => c.docId).filter(id => id !== undefined);
+  let attended: any[] = [];
+  if (docModel && docIds.length) {
+    try {
+      attended = await docModel.getMultiStatus(domainId, docModel.TYPE_CONTEST, { uid, docId: { $in: docIds }, attend: 1 }).project({ docId: 1 }).toArray();
+    } catch (e) { err('getMultiStatus error', e); }
+  }
   if (!attended.length) return { block: false };
+  const now = Date.now();
   for (const c of contests) {
-  const begin = new Date(c.beginAt).getTime();
-    if (now < begin && now >= begin - 60 * 60 * 1000) {
-  const a = attended.find(x => x.docId.toString() === c.docId.toString());
-      if (a) return { block: true, reason: '比赛开始前一小时禁止登录（IP控制）' };
+    const begin = new Date(c.beginAt).getTime();
+    if (now < begin && now >= begin - 3600_000) {
+      if (attended.find(a => a.docId?.toString?.() === c.docId?.toString?.())) {
+        return { block: true, reason: '比赛开始前一小时禁止登录（IP控制）' };
+      }
     }
   }
   return { block: false };
 }
 
-// 比赛期间 IP/UA 校验
-async function verifyContestIpUa(domainId: string, uid: number, ip: string, ua: string) {
-  if (!documentModel) return;
-  const contests = await listActiveIpControlContests(domainId);
+async function verifyDuringContest(domainId: string, uid: number, ip: string, ua: string) {
+  const contests = await listActive(domainId);
   if (!contests.length) return;
-  const now = Date.now();
-  const contestIds = contests.map(c => c.docId);
-  const attended = await documentModel.getMultiStatus(domainId, documentModel.TYPE_CONTEST, { uid, docId: { $in: contestIds }, attend: 1 }).project({ docId: 1 }).toArray();
+  const docIds = contests.map(c => c.docId).filter(id => id !== undefined);
+  let attended: any[] = [];
+  if (docModel && docIds.length) {
+    try { attended = await docModel.getMultiStatus(domainId, docModel.TYPE_CONTEST, { uid, docId: { $in: docIds }, attend: 1 }).project({ docId: 1 }).toArray(); } catch (e) { err('getMultiStatus error', e); }
+  }
   if (!attended.length) return;
+  const now = Date.now();
   for (const c of contests) {
-  const begin = new Date(c.beginAt).getTime();
-  const end = new Date(c.endAt).getTime();
+    const begin = new Date(c.beginAt).getTime();
+    const end = new Date(c.endAt).getTime();
     if (now >= begin && now <= end) {
-  const isAttend = attended.find(x => x.docId.toString() === c.docId.toString());
-      if (!isAttend) continue;
-  const key = `${c.docId}:${uid}`;
-      let lock = await ipLockColl.findOne({ _id: key }) as IpLockDoc | null;
-      if (!lock) {
-        lock = { _id: key, contestId: c.docId, uid, ip, ua, createdAt: new Date(), updatedAt: new Date() };
-        await ipLockColl.insertOne(lock);
-        iplog('Bind', { contest: c.docId.toString(), uid, ip, ua });
-      } else if (lock.ip !== ip || lock.ua !== ua) {
-        iplog('Reject change', { contest: c.docId.toString(), uid, oldIp: lock.ip, newIp: ip, oldUa: lock.ua, newUa: ua });
-        throw new ForbiddenError('IP/UA 与首次登录不一致，已启用比赛 IP 控制');
+      if (!attended.find(a => a.docId?.toString?.() === c.docId?.toString?.())) continue;
+      const key = `${c.docId}:${uid}`;
+      let rec: IpLockRecord | null = await ipLockColl.findOne({ _id: key });
+      if (!rec) {
+        rec = { _id: key, contestId: c.docId, uid, ip, ua, createdAt: new Date(), updatedAt: new Date() };
+        await ipLockColl.insertOne(rec);
+        log('bind first login', { contest: c.docId?.toString?.(), uid, ip, ua });
+      } else if (rec.ip !== ip || rec.ua !== ua) {
+        log('reject ip/ua change', { contest: c.docId?.toString?.(), uid, oldIp: rec.ip, newIp: ip, oldUa: rec.ua, newUa: ua });
+        throw new ForbiddenError('IP/UA 与首次登录不一致，比赛已启用 IP 控制');
       }
     }
   }
 }
 
-// 管理界面
-class IpControlContestHandler extends Handler {
-  async get(domainId: string) {
+// ---------------- 路由 Handler ----------------
+class ManageHandler extends Handler {
+  async get(domainIdParam: string) {
     this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
     const { contestId } = this.request.params;
-  console.log('[IPControl] Route GET /ipcontrol params', { contestId, domainId });
-  const contest = await getContest(domainId, contestId);
+    const contest = await fetchContest(domainIdParam, contestId);
     if (!contest) throw new ForbiddenError('比赛不存在');
-    const imported = await documentModel.countStatus(domainId, documentModel.TYPE_CONTEST, { docId: contest.docId, attend: 1 });
+    let imported = 0;
+    if (docModel && contest.docId !== undefined) {
+      try { imported = await docModel.countStatus(domainIdParam, docModel.TYPE_CONTEST, { docId: contest.docId, attend: 1 }); } catch { /* ignore */ }
+    }
     this.response.template = 'ipcontrol_contest_manage.html';
     this.response.body = { contest, imported };
   }
-  async post(domainId: string) {
+  async post(domainIdParam: string) {
     this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
     const { contestId } = this.request.params;
-  console.log('[IPControl] Route POST /ipcontrol params', { contestId, domainId, body: this.request.body });
-  const contest = await getContest(domainId, contestId);
+    const contest = await fetchContest(domainIdParam, contestId);
     if (!contest) throw new ForbiddenError('比赛不存在');
-    const { action, enabled, uidsText } = this.request.body;
+    const { action } = this.request.body;
     if (action === 'toggle') {
-      await documentModel.set(domainId, documentModel.TYPE_CONTEST, contest.docId, { ipControlEnabled: enabled === 'true' } as any);
+      const enable = this.request.body.enabled === 'true';
+      if (docModel && contest.docId !== undefined) {
+        await docModel.set(domainIdParam, docModel.TYPE_CONTEST, contest.docId, { ipControlEnabled: enable } as any);
+      } else {
+        // 直接更新底层 document 集合（不推荐，但保持行为）
+        try { await db.collection('document').updateOne({ _id: contest._id }, { $set: { ipControlEnabled: enable } }); } catch (e) { err('direct update ipControlEnabled failed', e); }
+      }
+      log('toggle', { contest: contest.docId, enable });
+      this.response.redirect = `/contest/${contestId}/ipcontrol`;
+      return;
+    }
+    if (action === 'import_uids') {
+      const text: string = this.request.body.uidsText || '';
+      const list: number[] = [];
+      text.split(/[\s,;]+/).forEach(t => { if (/^\d+$/.test(t)) list.push(+t); });
+      if (docModel && contest.docId !== undefined) {
+        for (const uid of list) {
+          await docModel.setStatus(domainIdParam, docModel.TYPE_CONTEST, contest.docId, uid, { attend: 1, subscribe: 1 } as any);
+        }
+      }
+      log('import uids', { contest: contest.docId, count: list.length });
       this.response.redirect = `/contest/${contestId}/ipcontrol`;
       return;
     }
     if (action === 'clear_locks') {
       await ipLockColl.deleteMany({ contestId: contest.docId });
-      iplog('Cleared locks for contest', contest.docId.toString());
-      this.response.redirect = `/contest/${contestId}/ipcontrol`;
-      return;
-    }
-    if (action === 'import_uids') {
-      const list: number[] = [];
-      (uidsText || '').split(/[\s,;]+/).forEach((t: string) => { if (/^\d+$/.test(t)) list.push(+t); });
-      for (const uid of list) {
-        await documentModel.setStatus(domainId, documentModel.TYPE_CONTEST, contest.docId, uid, { attend: 1, subscribe: 1 } as any);
-      }
-      iplog('Import attend list', { contest: contest.docId.toString(), count: list.length });
+      log('clear locks', { contest: contest.docId });
       this.response.redirect = `/contest/${contestId}/ipcontrol`;
       return;
     }
@@ -216,57 +190,50 @@ class IpControlContestHandler extends Handler {
   }
 }
 
+// ---------------- 入口 ----------------
 export async function apply(ctx: Context) {
-  // 初始化依赖的 model / collection
-  if (!documentModel) documentModel = (global as any).Hydro?.model?.document || (global as any).Hydro?.model?.doc || (global as any).Hydro?.model?.Document;
-  if (!documentModel) {
-    console.error('[IPControl] document model not found, plugin disabled');
-    return; // 直接退出，避免后续调用 undefined
-  }
-  if (!ipLockColl) {
-    ipLockColl = ctx.db.collection('ipcontrol_login');
-  console.log('[IPControl] ipLock collection ready');
-  }
+  // 初始化 model & collection
+  if (!docModel) docModel = (global as any).Hydro?.model?.document || (global as any).Hydro?.model?.doc || (global as any).Hydro?.model?.Document;
+  if (!ipLockColl) { ipLockColl = ctx.db.collection('ipcontrol_login'); log('ipLock collection ready'); }
   if (!db) db = ctx.db;
-  if (!ipLockIndexesEnsured) {
+  if (!indexesEnsured) {
     try {
       await ctx.db.ensureIndexes(
         ipLockColl,
         { key: { contestId: 1, uid: 1 }, name: 'contest_user' },
         { key: { createdAt: 1 }, name: 'createdAt' },
       );
-      ipLockIndexesEnsured = true;
-    } catch (e) {
-      console.error('[IPControl] ensure index failed', e);
-    }
+      indexesEnsured = true;
+    } catch (e) { err('ensureIndexes failed', e); }
   }
-  iplog('Plugin initialized');
-  ctx.Route('ipcontrol_contest_manage', '/contest/:contestId/ipcontrol', IpControlContestHandler, PRIV.PRIV_EDIT_SYSTEM);
-  console.log('[IPControl] Route registered: /contest/:contestId/ipcontrol');
-  ctx.on('handler/before/UserLogin#post', async (that: any) => {
-    const unameOrEmail = that.args.uname;
-  let udoc = await UserModel.getByEmail(that.args.domainId, unameOrEmail) || await UserModel.getByUname(that.args.domainId, unameOrEmail);
-  if (!udoc) return;
-    const domainId = that.args.domainId || 'system';
-    const { block, reason } = await shouldBlockLogin(domainId, udoc._id);
-    if (block) {
-      await TokenModel.delByUid(udoc._id); // 删除所有 token
-      iplog('Block login (pre-contest window)', { uid: udoc._id, reason });
-      throw new ForbiddenError(reason || '登录被 IP 控制策略阻止');
-    }
-  });
-  ctx.on('handler/after/UserLogin#post', async (that: any) => {
-    const uid = that.user?._id;
-    if (!uid) return;
-    const ip = normIp(that.request.ip || that.request.headers['x-forwarded-for']);
-    const ua = that.request.headers['user-agent'] || '';
-    const domainId = that.args.domainId || 'system';
+  log('plugin initialized');
+
+  // 管理路由
+  ctx.Route('ipcontrol_contest_manage', '/contest/:contestId/ipcontrol', ManageHandler, PRIV.PRIV_EDIT_SYSTEM);
+  log('route registered /contest/:contestId/ipcontrol');
+
+  // 登录前：阻止窗口内登录
+  ctx.on('handler/before/UserLogin#post', async (h: any) => {
+    const uname = h.args.uname;
+    let udoc = await UserModel.getByEmail(h.args.domainId, uname) || await UserModel.getByUname(h.args.domainId, uname);
+    if (!udoc) return;
+    const domainId = h.args.domainId || 'system';
     try {
-      await verifyContestIpUa(domainId, uid, ip, ua);
-    } catch (e) {
-      // 若抛出 ForbiddenError 让框架处理
-      if (!(e instanceof ForbiddenError)) console.error('[IPControl] verify error', e);
-      throw e;
-    }
+      const { block, reason } = await shouldBlockLogin(domainId, udoc._id);
+      if (block) {
+        await TokenModel.delByUid(udoc._id);
+        log('block pre-contest login', { uid: udoc._id, reason });
+        throw new ForbiddenError(reason || '登录被 IP 控制策略阻止');
+      }
+    } catch (e) { err('before login hook error', e); throw e; }
+  });
+
+  // 登录后：锁定 / 校验 IP+UA
+  ctx.on('handler/after/UserLogin#post', async (h: any) => {
+    const uid = h.user?._id; if (!uid) return;
+    const domainId = h.args.domainId || 'system';
+    const ip = firstIp(h.request.ip || h.request.headers['x-forwarded-for']);
+    const ua = h.request.headers['user-agent'] || '';
+    try { await verifyDuringContest(domainId, uid, ip, ua); } catch (e) { if (!(e instanceof ForbiddenError)) err('after login verify error', e); throw e; }
   });
 }
