@@ -14,7 +14,7 @@
       <div class="section__body">
         <span class="bp5-tag bp5-large bp5-minimal problem__tag-item">{{ _(model.contest.statusText(tdoc, tsdoc)) }}</span>
         <span class="bp5-tag bp5-large bp5-minimal problem__tag-item icon icon-award">{{ _(model.contest.RULES[tdoc.rule].TEXT) }}</span>
-        <span class="bp5-tag bp5-large bp5-minimal problem__tag-item">{{ _('Start at') }}: {{ contest.render_time(tsdoc.startAt or tdoc.beginAt) }}</span>
+        <span class="bp5-tag bp5-large bp5-minimal problem__tag-item">{{ _('Start at') }}: {{ contest.render_time(tsdoc.startAt | default(tdoc.beginAt)) }}</span>
         <span class="bp5-tag bp5-large bp5-minimal problem__tag-item icon icon-schedule">{{ contest.render_duration(tdoc) }} {{ _('hour(s)') }}</span>
         <span class="bp5-tag bp5-large bp5-minimal problem__tag-item">{{ _('Host') }}: {{ user.render_inline(udict[tdoc.owner], badge=false) }}</span>
         <span class="bp5-tag bp5-large bp5-minimal problem__tag-item icon icon-user--multiple">{{ tdoc['attend']|default(0) }}</span>
@@ -47,7 +47,7 @@
           <p><strong>IP控制通知:</strong></p>
           <ul>
             <li>此比赛已启用IP控制</li>
-            <li>比赛开始前{{ setting.preContestLockMinutes || 60 }}分钟内将禁止登录</li>
+            <li>比赛开始前{{ setting.preContestLockMinutes | default(60) }}分钟内将禁止登录</li>
             <li>比赛期间，您必须使用与首次登录相同的IP地址和浏览器</li>
             <li>任何来自不同IP/浏览器的登录尝试都将被阻止</li>
             {% if setting.strictMode %}
