@@ -1,4 +1,5 @@
 import { Context, Handler, PRIV, ForbiddenError, TokenModel, UserModel } from 'hydrooj';
+import { ObjectId } from 'mongodb';
 
 // 延迟初始化引用
 let documentModel: any; // 在 apply 中赋值
@@ -29,9 +30,25 @@ interface IpLockDoc {
 }
 
 // 工具函数
+function tryCastObjectId(id: any) {
+  if (typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id)) {
+    try { return new ObjectId(id); } catch { return id; }
+  }
+  return id;
+}
+
 async function getContest(domainId: string, contestId: any) {
-  if (!documentModel) return null;
-  return await documentModel.get(domainId, documentModel.TYPE_CONTEST, contestId);
+  if (!documentModel) {
+    console.log('[IPControl] getContest: documentModel not ready');
+    return null;
+  }
+  const original = contestId;
+  const casted = tryCastObjectId(contestId);
+  console.log('[IPControl] getContest start', { domainId, original: String(original), casted: casted?.toString?.() });
+  const found = await documentModel.get(domainId, documentModel.TYPE_CONTEST, casted);
+  if (!found) console.log('[IPControl] getContest not found', { domainId, contestId: String(casted) });
+  else console.log('[IPControl] getContest success', { _id: found._id?.toString?.(), docId: found.docId?.toString?.(), title: found.title, beginAt: found.beginAt, endAt: found.endAt, ipControlEnabled: found.ipControlEnabled });
+  return found;
 }
 
 async function listActiveIpControlContests(domainId: string) {
@@ -105,7 +122,8 @@ class IpControlContestHandler extends Handler {
   async get(domainId: string) {
     this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
     const { contestId } = this.request.params;
-    const contest = await getContest(domainId, contestId);
+  console.log('[IPControl] Route GET /ipcontrol params', { contestId, domainId });
+  const contest = await getContest(domainId, contestId);
     if (!contest) throw new ForbiddenError('比赛不存在');
     const imported = await documentModel.countStatus(domainId, documentModel.TYPE_CONTEST, { docId: contest.docId, attend: 1 });
     this.response.template = 'ipcontrol_contest_manage.html';
@@ -114,7 +132,8 @@ class IpControlContestHandler extends Handler {
   async post(domainId: string) {
     this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
     const { contestId } = this.request.params;
-    const contest = await getContest(domainId, contestId);
+  console.log('[IPControl] Route POST /ipcontrol params', { contestId, domainId, body: this.request.body });
+  const contest = await getContest(domainId, contestId);
     if (!contest) throw new ForbiddenError('比赛不存在');
     const { action, enabled, uidsText } = this.request.body;
     if (action === 'toggle') {
@@ -151,6 +170,7 @@ export async function apply(ctx: Context) {
   }
   if (!ipLockColl) {
     ipLockColl = ctx.db.collection('ipcontrol_login');
+  console.log('[IPControl] ipLock collection ready');
   }
   if (!ipLockIndexesEnsured) {
     try {
@@ -166,6 +186,7 @@ export async function apply(ctx: Context) {
   }
   iplog('Plugin initialized');
   ctx.Route('ipcontrol_contest_manage', '/contest/:contestId/ipcontrol', IpControlContestHandler, PRIV.PRIV_EDIT_SYSTEM);
+  console.log('[IPControl] Route registered: /contest/:contestId/ipcontrol');
   ctx.on('handler/before/UserLogin#post', async (that: any) => {
     const unameOrEmail = that.args.uname;
   let udoc = await UserModel.getByEmail(that.args.domainId, unameOrEmail) || await UserModel.getByUname(that.args.domainId, unameOrEmail);
