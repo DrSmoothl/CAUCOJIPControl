@@ -142,7 +142,8 @@
                                                     <input type="hidden" name="action" value="remove_participant">
                                                     <input type="hidden" name="uidToRemove" value="{{ participant.uid }}">
                                                     <button type="submit" class="ipcontrol-btn ipcontrol-btn-danger ipcontrol-btn-small"
-                                                            onclick="return confirm('确定要移除用户 {{ participant.uname }} 吗？')">
+                                                            data-username="{{ participant.uname }}"
+                                                            onclick="return confirm('确定要移除用户 ' + this.dataset.username + ' 吗？')">>>
                                                         <i class="icon icon-close"></i> 移除
                                                     </button>
                                                 </form>
