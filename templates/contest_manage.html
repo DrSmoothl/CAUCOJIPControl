@@ -1,0 +1,22 @@
+{% extends "layout/basic.html" %}
+{% import "components/contest.html" as contest with context %}
+{% import "components/problem.html" as problem with context %}
+{% block content %}
+{{ set(UiContext, 'tdoc', tdoc) }}
+<div class="row">
+  <div class="medium-9 columns">
+    <div class="ipc-inline-panel">
+      <a class="ipc-entry-btn" href="/contest/{{ tdoc._id }}/ipcontrol">IP 控制设置</a>
+    </div>
+    {% include "canuse-templates/contest_manage.html" %}
+  </div>
+  <div class="medium-3 columns">
+    {% include 'partials/contest_sidebar_management.html' %}
+  </div>
+</div>
+<style>
+.ipc-inline-panel{margin:10px 0;padding:10px 12px;background:#26262c;border:1px solid #333;border-radius:6px;display:flex;justify-content:flex-start;align-items:center;gap:12px;}
+.ipc-entry-btn{background:#1976d2;color:#fff!important;padding:6px 14px;border-radius:4px;font-size:14px;text-decoration:none;}
+.ipc-entry-btn:hover{background:#1e88e5;}
+</style>
+{% endblock %}
