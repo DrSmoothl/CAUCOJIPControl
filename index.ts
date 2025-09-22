@@ -44,12 +44,18 @@ async function getContest(domainId: string, contestId: any) {
     console.log('[IPControl] getContest: documentModel not ready');
     return null;
   }
+  const normalizeDomainId = (d: any) => (typeof d === 'string' ? d : (d?.domainId || 'system'));
+  const domainIdStr = normalizeDomainId(domainId as any);
   const original = contestId;
   const casted = tryCastObjectId(contestId);
-  console.log('[IPControl] getContest start', { domainId, original: String(original), casted: casted?.toString?.() });
-  const found = await documentModel.get(domainId, documentModel.TYPE_CONTEST, casted);
-  if (!found) console.log('[IPControl] getContest not found', { domainId, contestId: String(casted) });
-  else console.log('[IPControl] getContest success', { _id: found._id?.toString?.(), docId: found.docId?.toString?.(), title: found.title, beginAt: found.beginAt, endAt: found.endAt, ipControlEnabled: found.ipControlEnabled });
+  console.log('[IPControl] getContest start', { domainIdParam: domainId, domainIdStr, original: String(original), casted: casted?.toString?.() });
+  let found = await documentModel.get(domainIdStr, documentModel.TYPE_CONTEST, casted);
+  if (!found && casted !== original) {
+    console.log('[IPControl] retry with original id (cast differed)');
+    found = await documentModel.get(domainIdStr, documentModel.TYPE_CONTEST, original);
+  }
+  if (!found) console.log('[IPControl] getContest not found', { domainIdStr, contestId: String(casted) });
+  else console.log('[IPControl] getContest success', { domainIdStr, _id: found._id?.toString?.(), docId: found.docId?.toString?.(), title: found.title, beginAt: found.beginAt, endAt: found.endAt, ipControlEnabled: found.ipControlEnabled });
   return found;
 }
 
