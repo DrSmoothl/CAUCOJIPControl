@@ -188,12 +188,38 @@ class ManageHandler extends Handler {
       const text: string = this.request.body.uidsText || '';
       const list: number[] = [];
       text.split(/[\s,;]+/).forEach(t => { if (/^\d+$/.test(t)) list.push(+t); });
+      const results: any[] = [];
       if (docModel && contest.docId !== undefined) {
         for (const uid of list) {
-          await docModel.setStatus(domainIdParam, docModel.TYPE_CONTEST, contest.docId, uid, { attend: 1, subscribe: 1 } as any);
+          const attempts: any = { uid };
+          // 尝试使用 contest.docId
+            try {
+              await docModel.setStatus(domainIdParam, docModel.TYPE_CONTEST, contest.docId, uid, { attend: 1, subscribe: 1 } as any);
+              attempts.byDocId = 'ok';
+            } catch (e) { attempts.byDocId = 'err'; attempts.byDocIdErr = (e as any)?.message; }
+          // 如果 _id 与 docId 字符串不同，再尝试 _id
+          const docIdStr = contest.docId?.toString?.();
+          const rawIdStr = contest._id?.toString?.();
+          if (rawIdStr && docIdStr && rawIdStr !== docIdStr) {
+            try {
+              await docModel.setStatus(domainIdParam, docModel.TYPE_CONTEST, contest._id, uid, { attend: 1, subscribe: 1 } as any);
+              attempts.byRawId = 'ok';
+            } catch (e) { attempts.byRawId = 'err'; attempts.byRawIdErr = (e as any)?.message; }
+          }
+          // 验证
+          try {
+            const st = await docModel.getMultiStatus(domainIdParam, docModel.TYPE_CONTEST, { uid, docId: { $in: [contest.docId, contest._id] }, attend: 1 }).project({ docId:1 }).toArray();
+            attempts.verifyCount = st.length;
+          } catch (e) { attempts.verifyErr = (e as any)?.message; }
+          results.push(attempts);
         }
       }
-      log('import uids', { contest: contest.docId, count: list.length });
+      // 最终统计
+      let importedActual = 0;
+      try {
+        if (docModel && contest.docId !== undefined) importedActual = await docModel.countStatus(domainIdParam, docModel.TYPE_CONTEST, { docId: contest.docId, attend: 1 });
+      } catch {}
+      log('import uids', { contest: contest.docId, requested: list.length, results, importedActual });
       this.response.redirect = `/contest/${contestId}/ipcontrol`;
       return;
     }
