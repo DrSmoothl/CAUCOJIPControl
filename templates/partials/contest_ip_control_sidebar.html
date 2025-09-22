@@ -1,0 +1,54 @@
+{% if handler.user.hasPriv(model.builtin.PRIV.PRIV_EDIT_SYSTEM) %}
+<div class="section sidebar">
+  <div class="section__header">
+    <h1 class="section__title">IP控制管理</h1>
+  </div>
+  <div class="section__body">
+    <div class="menu">
+      <div class="menu__item">
+        <a href="/contest/{{ tdoc._id }}/ip-control" class="menu__link">
+          <i class="icon icon-security"></i>
+          IP控制设置
+        </a>
+      </div>
+      {% if tdoc.userBindPermission and tdoc.userBindPermission.enabled %}
+      <div class="menu__item">
+        <span class="menu__link ipcontrol-status-enabled">
+          <i class="icon icon-check"></i>
+          已启用IP控制
+        </span>
+      </div>
+      {% else %}
+      <div class="menu__item">
+        <span class="menu__link ipcontrol-status-disabled">
+          <i class="icon icon-close"></i>
+          未启用IP控制
+        </span>
+      </div>
+      {% endif %}
+      <div class="menu__item">
+        <a href="/ip-control/violations?contestId={{ tdoc._id }}" class="menu__link">
+          <i class="icon icon-list"></i>
+          违规记录
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+.ipcontrol-status-enabled {
+  color: #27ae60 !important;
+  cursor: default;
+}
+
+.ipcontrol-status-disabled {
+  color: #e74c3c !important;
+  cursor: default;
+}
+
+.menu__link i {
+  margin-right: 8px;
+}
+</style>
+{% endif %}

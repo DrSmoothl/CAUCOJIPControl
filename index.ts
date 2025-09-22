@@ -25,12 +25,17 @@ interface IPControlRecord {
     _id?: any;
     uid: number; // 用户ID
     contestId: any; // 比赛ID
-    firstLoginIP: string; // 首次登录IP
-    firstLoginUA: string; // 首次登录UA
-    firstLoginAt: Date; // 首次登录时间
-    loginCount: number; // 登录次数
-    lastLoginAt: Date; // 最后登录时间
-    violations: Array<{
+    type?: string; // 记录类型：'login' | 'violation'
+    firstLoginIP?: string; // 首次登录IP
+    firstLoginUA?: string; // 首次登录UA
+    firstLoginAt?: Date; // 首次登录时间
+    loginCount?: number; // 登录次数
+    lastLoginAt?: Date; // 最后登录时间
+    ip?: string; // 当前IP（用于违规记录）
+    userAgent?: string; // 当前UA（用于违规记录）
+    timestamp?: Date; // 时间戳（用于违规记录）
+    details?: any; // 详细信息（用于违规记录）
+    violations?: Array<{
         ip: string;
         ua: string;
         timestamp: Date;
@@ -45,6 +50,12 @@ interface ContestParticipant {
     forced: boolean; // 是否强制参赛
     addedAt: Date; // 添加时间
     addedBy: number; // 添加者
+    firstLoginIP?: string; // 首次登录IP
+    firstLoginUA?: string; // 首次登录UA
+    firstLoginAt?: Date; // 首次登录时间
+    lastLoginAt?: Date; // 最后登录时间
+    loginCount?: number; // 登录次数
+    violationCount?: number; // 违规次数
 }
 
 declare module 'hydrooj' {
@@ -260,6 +271,43 @@ const ipControlModel = {
                     });
                 }
             }
+        }
+    },
+
+    // 记录用户违规行为
+    async recordViolation(uid: number, contestId: any, ip: string, ua: string, details: any): Promise<void> {
+        try {
+            // 记录到违规记录集合
+            await ipControlRecordsColl.insertOne({
+                uid,
+                contestId,
+                type: 'violation',
+                ip,
+                userAgent: ua,
+                timestamp: new Date(),
+                details
+            });
+
+            // 更新参赛者的违规次数
+            await contestParticipantsColl.updateOne(
+                { contestId, uid },
+                { 
+                    $inc: { violationCount: 1 },
+                    $push: { 
+                        violations: {
+                            ip,
+                            ua,
+                            timestamp: new Date(),
+                            blocked: true
+                        }
+                    }
+                },
+                { upsert: true }
+            );
+
+            console.log(`记录用户 ${uid} 在比赛 ${contestId} 中的违规行为: ${details.reason}`);
+        } catch (error) {
+            console.error('记录违规行为失败:', error);
         }
     },
 
@@ -484,9 +532,9 @@ const ipControlModel = {
                     uname: user.uname,
                     firstLoginIP: record.firstLoginIP,
                     firstLoginUA: record.firstLoginUA,
-                    firstLoginAtFormatted: new Date(record.firstLoginAt).toLocaleString('zh-CN'),
-                    loginCount: record.loginCount,
-                    lastLoginAtFormatted: new Date(record.lastLoginAt).toLocaleString('zh-CN'),
+                    firstLoginAtFormatted: record.firstLoginAt ? new Date(record.firstLoginAt).toLocaleString('zh-CN') : '未知',
+                    loginCount: record.loginCount || 0,
+                    lastLoginAtFormatted: record.lastLoginAt ? new Date(record.lastLoginAt).toLocaleString('zh-CN') : '未知',
                     violationCount: record.violations ? record.violations.length : 0
                 });
             }
@@ -587,8 +635,8 @@ const ipControlModel = {
             (record as any).contest = contest ? { _id: contest._id, title: contest.title } : null;
             
             // 格式化时间数据
-            (record as any).firstLoginAtFormatted = new Date(record.firstLoginAt).toLocaleString('zh-CN');
-            (record as any).lastLoginAtFormatted = new Date(record.lastLoginAt).toLocaleString('zh-CN');
+            (record as any).firstLoginAtFormatted = record.firstLoginAt ? new Date(record.firstLoginAt).toLocaleString('zh-CN') : '未知';
+            (record as any).lastLoginAtFormatted = record.lastLoginAt ? new Date(record.lastLoginAt).toLocaleString('zh-CN') : '未知';
             
             // 格式化违规记录中的时间
             if (record.violations && record.violations.length > 0) {
@@ -1051,6 +1099,104 @@ export function apply(ctx: Context) {
             
             // 记录登录信息
             await ipControlModel.recordUserLogin(that.user._id, ip, ua);
+        }
+    });
+
+    // 监听比赛页面访问事件 - 检查IP控制
+    ctx.on('handler/before/ContestDetailHandler#get', async (that) => {
+        const { tid: contestId } = that.args;
+        const userId = that.user?._id;
+        
+        if (!userId) return; // 未登录用户跳过检查
+        
+        // 检查比赛是否启用了IP控制
+        const setting = await ipControlModel.getContestIPControl(contestId);
+        if (!setting || !setting.enabled) return; // 未启用IP控制跳过
+        
+        const ip = that.request.ip;
+        const ua = that.request.headers['user-agent'] || '';
+        
+        // 检查是否在锁定期
+        const inLockPeriod = await ipControlModel.isContestInLockPeriod(contestId);
+        if (inLockPeriod) {
+            // 检查用户是否已经参加比赛
+            const participantStatus = await db.collection('document.status').findOne({
+                uid: userId,
+                docType: 30,
+                docId: contestId,
+                attend: 1
+            });
+            
+            if (participantStatus) {
+                // 已参赛用户在锁定期被强制下线
+                await ipControlModel.clearUserTokens(userId);
+                throw new ForbiddenError(`比赛开始前${setting.preContestLockMinutes || 60}分钟内禁止访问比赛页面`);
+            }
+        }
+        
+        // 检查用户是否已参加比赛
+        const participantStatus = await db.collection('document.status').findOne({
+            uid: userId,
+            docType: 30,
+            docId: contestId,
+            attend: 1
+        });
+        
+        if (participantStatus) {
+            // 检查IP一致性
+            let participant = await contestParticipantsColl.findOne({
+                contestId,
+                uid: userId
+            });
+            
+            if (participant && participant.firstLoginIP) {
+                // 检查IP和UA一致性
+                const ipMatches = participant.firstLoginIP === ip;
+                const uaMatches = setting.strictMode ? participant.firstLoginUA === ua : true;
+                
+                if (!ipMatches || !uaMatches) {
+                    // 记录违规
+                    await ipControlModel.recordViolation(userId, contestId, ip, ua, {
+                        originalIP: participant.firstLoginIP,
+                        originalUA: participant.firstLoginUA,
+                        currentIP: ip,
+                        currentUA: ua,
+                        reason: !ipMatches ? 'IP_CHANGE' : 'UA_CHANGE'
+                    });
+                    
+                    // 清除登录状态
+                    await ipControlModel.clearUserTokens(userId);
+                    
+                    const reason = !ipMatches ? 
+                        `IP地址已变更，原IP: ${participant.firstLoginIP}，当前IP: ${ip}` :
+                        `浏览器环境已变更，请使用原始设备访问`;
+                    
+                    throw new ForbiddenError(`检测到设备变更，${reason}`);
+                }
+                
+                // 更新最后登录时间和次数
+                await contestParticipantsColl.updateOne(
+                    { contestId, uid: userId },
+                    { 
+                        $set: { lastLoginAt: new Date() },
+                        $inc: { loginCount: 1 }
+                    }
+                );
+            } else if (participant) {
+                // 首次访问，记录IP和UA
+                await contestParticipantsColl.updateOne(
+                    { contestId, uid: userId },
+                    { 
+                        $set: {
+                            firstLoginIP: ip,
+                            firstLoginUA: ua,
+                            firstLoginAt: new Date(),
+                            lastLoginAt: new Date(),
+                            loginCount: 1
+                        }
+                    }
+                );
+            }
         }
     });
 

@@ -10,13 +10,6 @@
     <div class="section">
       <div class="section__header" style="align: center">
         <h1 class="section__title">{{ tdoc.title }}</h1>
-        {% if handler.user.hasPriv(model.builtin.PRIV.PRIV_EDIT_SYSTEM) %}
-        <div class="section__tools">
-          <a href="/contest/{{ tdoc._id }}/ip-control" class="ipcontrol-manage-btn">
-            <i class="icon icon-security"></i> IP控制设置
-          </a>
-        </div>
-        {% endif %}
       </div>
       <div class="section__body">
         <span class="bp5-tag bp5-large bp5-minimal problem__tag-item">{{ _(model.contest.statusText(tdoc, tsdoc)) }}</span>
@@ -74,29 +67,11 @@
   <div class="medium-3 columns">
   {% set owner_udoc = udict[tdoc.owner] %}
   {% include "partials/contest_sidebar.html" %}
+  {% include "partials/contest_ip_control_sidebar.html" %}
   </div>
 </div>
 
 <style>
-.ipcontrol-manage-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  background: #3aa9de;
-  color: white;
-  text-decoration: none;
-  border-radius: 4px;
-  font-size: 0.9em;
-  transition: background-color 0.2s;
-}
-
-.ipcontrol-manage-btn:hover {
-  background: #2980b9;
-  color: white;
-  text-decoration: none;
-}
-
 .ipcontrol-security-tag {
   background: #ff7675 !important;
   color: white !important;
