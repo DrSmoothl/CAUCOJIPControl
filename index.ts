@@ -662,6 +662,27 @@ class ContestIPControlHandler extends Handler {
         // 获取强制参赛用户列表
         const forcedParticipants = await ipControlModel.getForcedParticipants(contestId);
 
+        // 格式化时间信息供模板使用
+        const now = new Date();
+        const timeInfo = {
+            now: now.toLocaleString('zh-CN'),
+            contestStart: new Date(contest.beginAt).toLocaleString('zh-CN'),
+            contestEnd: new Date(contest.endAt).toLocaleString('zh-CN'),
+            lockStart: setting ? new Date(contest.beginAt.getTime() - (setting.preContestLockMinutes || 60) * 60 * 1000).toLocaleString('zh-CN') : null,
+            status: (() => {
+                if (!setting || !setting.enabled) return 'disabled';
+                const startTime = contest.beginAt.getTime();
+                const endTime = contest.endAt.getTime();
+                const lockStartTime = startTime - (setting.preContestLockMinutes || 60) * 60 * 1000;
+                const currentTime = now.getTime();
+                
+                if (currentTime < lockStartTime) return 'normal';
+                if (currentTime >= lockStartTime && currentTime < startTime) return 'locked';
+                if (currentTime >= startTime && currentTime <= endTime) return 'running';
+                return 'ended';
+            })()
+        };
+
         // 检查是否有成功消息
         const { success, message } = this.request.query;
 
@@ -675,6 +696,7 @@ class ContestIPControlHandler extends Handler {
                 allowedIPs: []
             },
             forcedParticipants,
+            timeInfo,
             success: success === '1',
             message: message ? decodeURIComponent(message as string) : null
         };
@@ -788,6 +810,27 @@ class ContestIPControlHandler extends Handler {
             const setting = await ipControlModel.getContestIPControl(contestId);
             const forcedParticipants = await ipControlModel.getForcedParticipants(contestId);
 
+            // 格式化时间信息供模板使用
+            const now = new Date();
+            const timeInfo = contest ? {
+                now: now.toLocaleString('zh-CN'),
+                contestStart: new Date(contest.beginAt).toLocaleString('zh-CN'),
+                contestEnd: new Date(contest.endAt).toLocaleString('zh-CN'),
+                lockStart: setting ? new Date(contest.beginAt.getTime() - (setting.preContestLockMinutes || 60) * 60 * 1000).toLocaleString('zh-CN') : null,
+                status: (() => {
+                    if (!setting || !setting.enabled) return 'disabled';
+                    const startTime = contest.beginAt.getTime();
+                    const endTime = contest.endAt.getTime();
+                    const lockStartTime = startTime - (setting.preContestLockMinutes || 60) * 60 * 1000;
+                    const currentTime = now.getTime();
+                    
+                    if (currentTime < lockStartTime) return 'normal';
+                    if (currentTime >= lockStartTime && currentTime < startTime) return 'locked';
+                    if (currentTime >= startTime && currentTime <= endTime) return 'running';
+                    return 'ended';
+                })()
+            } : null;
+
             this.response.template = 'contest_ip_control.html';
             this.response.body = {
                 contest,
@@ -798,6 +841,7 @@ class ContestIPControlHandler extends Handler {
                     allowedIPs: []
                 },
                 forcedParticipants,
+                timeInfo,
                 error: error.message,
                 formData: this.request.body
             };

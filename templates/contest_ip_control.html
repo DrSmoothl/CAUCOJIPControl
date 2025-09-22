@@ -136,7 +136,7 @@
                                             <td>
                                                 <a href="/user/{{ participant.uid }}">{{ participant.uname }}</a>
                                             </td>
-                                            <td>{{ moment(participant.addedAt).format('YYYY-MM-DD HH:mm') }}</td>
+                                            <td>{{ new Date(participant.addedAt).toLocaleString('zh-CN') }}</td>
                                             <td>
                                                 <form method="post" style="display: inline;">
                                                     <input type="hidden" name="action" value="remove_participant">
@@ -163,35 +163,32 @@
 
                 <!-- 比赛状态信息 -->
                 <div class="ipcontrol-contest-status">
-                    {% set now = moment() %}
-                    {% set start = moment(contest.beginAt) %}
-                    {% set end = moment(contest.endAt) %}
-                    {% set lockStart = moment(contest.beginAt).subtract(setting.preContestLockMinutes, 'minutes') %}
-                    
                     <div class="ipcontrol-status-card">
                         <h4>比赛状态</h4>
                         <div class="ipcontrol-status-info">
                             <div class="ipcontrol-status-item">
-                                <strong>当前时间:</strong> {{ now.format('YYYY-MM-DD HH:mm:ss') }}
+                                <strong>当前时间:</strong> {{ timeInfo.now }}
                             </div>
                             <div class="ipcontrol-status-item">
-                                <strong>比赛开始:</strong> {{ start.format('YYYY-MM-DD HH:mm:ss') }}
+                                <strong>比赛开始:</strong> {{ timeInfo.contestStart }}
                             </div>
                             <div class="ipcontrol-status-item">
-                                <strong>比赛结束:</strong> {{ end.format('YYYY-MM-DD HH:mm:ss') }}
+                                <strong>比赛结束:</strong> {{ timeInfo.contestEnd }}
                             </div>
-                            {% if setting.enabled %}
+                            {% if setting.enabled and timeInfo.lockStart %}
                             <div class="ipcontrol-status-item">
-                                <strong>锁定开始:</strong> {{ lockStart.format('YYYY-MM-DD HH:mm:ss') }}
+                                <strong>锁定开始:</strong> {{ timeInfo.lockStart }}
                             </div>
                             {% endif %}
                             <div class="ipcontrol-status-item">
                                 <strong>当前状态:</strong>
-                                {% if now < lockStart %}
+                                {% if timeInfo.status == 'disabled' %}
+                                    <span class="ipcontrol-status ipcontrol-status-disabled">未启用IP控制</span>
+                                {% elif timeInfo.status == 'normal' %}
                                     <span class="ipcontrol-status ipcontrol-status-normal">正常期</span>
-                                {% elif now >= lockStart and now < start %}
+                                {% elif timeInfo.status == 'locked' %}
                                     <span class="ipcontrol-status ipcontrol-status-locked">锁定期</span>
-                                {% elif now >= start and now <= end %}
+                                {% elif timeInfo.status == 'running' %}
                                     <span class="ipcontrol-status ipcontrol-status-running">比赛中</span>
                                 {% else %}
                                     <span class="ipcontrol-status ipcontrol-status-ended">已结束</span>
@@ -512,6 +509,11 @@
 .ipcontrol-status-ended {
     background: #e0e0e0;
     color: #666;
+}
+
+.ipcontrol-status-disabled {
+    background: #ddd;
+    color: #999;
 }
 </style>
 {% endblock %}

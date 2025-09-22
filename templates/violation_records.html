@@ -99,7 +99,7 @@
                                         </div>
                                         <div class="ipcontrol-time">
                                             <i class="icon icon-clock"></i>
-                                            {{ moment(record.firstLoginAt).format('MM-DD HH:mm') }}
+                                            {{ new Date(record.firstLoginAt).toLocaleDateString('zh-CN') + ' ' + new Date(record.firstLoginAt).toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'}) }}
                                         </div>
                                         <div class="ipcontrol-ua" title="{{ record.firstLoginUA }}">
                                             <i class="icon icon-computer"></i>
@@ -125,7 +125,7 @@
                                         <div class="ipcontrol-violation-item">
                                             <div class="ipcontrol-violation-header">
                                                 <span class="ipcontrol-violation-time">
-                                                    {{ moment(violation.timestamp).format('MM-DD HH:mm:ss') }}
+                                                    {{ new Date(violation.timestamp).toLocaleDateString('zh-CN') + ' ' + new Date(violation.timestamp).toLocaleTimeString('zh-CN') }}
                                                 </span>
                                                 {% if violation.blocked %}
                                                 <span class="ipcontrol-badge ipcontrol-badge-danger">已阻止</span>
@@ -156,7 +156,7 @@
                                 
                                 <td>
                                     <div class="ipcontrol-last-activity">
-                                        {{ moment(record.lastLoginAt).format('YYYY-MM-DD HH:mm') }}
+                                        {{ new Date(record.lastLoginAt).toLocaleString('zh-CN') }}
                                     </div>
                                 </td>
                             </tr>
