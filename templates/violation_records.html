@@ -1,0 +1,518 @@
+{% extends "layout/basic.html" %}
+{% block title %}IP控制违规记录{% endblock %}
+
+{% block content %}
+<div class="ipcontrol-violations-container">
+    <div class="row">
+        <div class="medium-12 columns">
+            <div class="section">
+                <div class="section__header">
+                    <h1 class="section__title">IP控制违规记录</h1>
+                    <div class="section__tools">
+                        <a href="/ip-control" class="ipcontrol-btn ipcontrol-btn-secondary">
+                            <i class="icon icon-arrow-left"></i> 返回IP控制管理
+                        </a>
+                    </div>
+                </div>
+
+                <!-- 筛选器 -->
+                <div class="ipcontrol-filters">
+                    <form method="get" class="ipcontrol-filter-form">
+                        <div class="ipcontrol-filter-group">
+                            <label for="contestId">筛选比赛：</label>
+                            <select id="contestId" name="contestId" class="ipcontrol-select">
+                                <option value="">所有比赛</option>
+                                {% for contest in ipControlContests %}
+                                <option value="{{ contest.contestId }}" 
+                                        {% if selectedContestId == contest.contestId %}selected{% endif %}>
+                                    {{ contest.title }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        
+                        <button type="submit" class="ipcontrol-btn ipcontrol-btn-primary">
+                            <i class="icon icon-search"></i> 筛选
+                        </button>
+                    </form>
+                </div>
+
+                <!-- 统计信息 -->
+                <div class="ipcontrol-violations-stats">
+                    <div class="ipcontrol-stat-item">
+                        <strong>总违规记录：</strong> {{ total }} 条
+                    </div>
+                    {% if selectedContestId %}
+                    <div class="ipcontrol-stat-item">
+                        <strong>当前比赛违规：</strong> {{ records|length }} 条
+                    </div>
+                    {% endif %}
+                </div>
+
+                <!-- 违规记录表格 -->
+                {% if records %}
+                <div class="ipcontrol-table-responsive">
+                    <table class="ipcontrol-table">
+                        <thead>
+                            <tr>
+                                <th>用户</th>
+                                <th>比赛</th>
+                                <th>首次登录信息</th>
+                                <th>登录统计</th>
+                                <th>违规详情</th>
+                                <th>最后活动</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for record in records %}
+                            <tr class="ipcontrol-violation-row">
+                                <td>
+                                    {% if record.user %}
+                                        <div class="ipcontrol-user-info">
+                                            <a href="/user/{{ record.user._id }}" class="ipcontrol-user-link">
+                                                {{ record.user.uname }}
+                                            </a>
+                                            <div class="ipcontrol-user-id">ID: {{ record.user._id }}</div>
+                                        </div>
+                                    {% else %}
+                                        <span class="ipcontrol-text-muted">未知用户 ({{ record.uid }})</span>
+                                    {% endif %}
+                                </td>
+                                
+                                <td>
+                                    {% if record.contest %}
+                                        <div class="ipcontrol-contest-info">
+                                            <a href="/contest/{{ record.contest._id }}" class="ipcontrol-contest-link">
+                                                {{ record.contest.title }}
+                                            </a>
+                                        </div>
+                                    {% else %}
+                                        <span class="ipcontrol-text-muted">未知比赛</span>
+                                    {% endif %}
+                                </td>
+                                
+                                <td>
+                                    <div class="ipcontrol-login-info">
+                                        <div class="ipcontrol-ip">
+                                            <i class="icon icon-globe"></i>
+                                            <code>{{ record.firstLoginIP }}</code>
+                                        </div>
+                                        <div class="ipcontrol-time">
+                                            <i class="icon icon-clock"></i>
+                                            {{ moment(record.firstLoginAt).format('MM-DD HH:mm') }}
+                                        </div>
+                                        <div class="ipcontrol-ua" title="{{ record.firstLoginUA }}">
+                                            <i class="icon icon-computer"></i>
+                                            {{ record.firstLoginUA[:50] }}{% if record.firstLoginUA|length > 50 %}...{% endif %}
+                                        </div>
+                                    </div>
+                                </td>
+                                
+                                <td>
+                                    <div class="ipcontrol-stats">
+                                        <div class="ipcontrol-stat-badge ipcontrol-badge-info">
+                                            总登录: {{ record.loginCount }}
+                                        </div>
+                                        <div class="ipcontrol-stat-badge ipcontrol-badge-danger">
+                                            违规: {{ record.violations|length }}
+                                        </div>
+                                    </div>
+                                </td>
+                                
+                                <td>
+                                    <div class="ipcontrol-violations-list">
+                                        {% for violation in record.violations[-3:] %}
+                                        <div class="ipcontrol-violation-item">
+                                            <div class="ipcontrol-violation-header">
+                                                <span class="ipcontrol-violation-time">
+                                                    {{ moment(violation.timestamp).format('MM-DD HH:mm:ss') }}
+                                                </span>
+                                                {% if violation.blocked %}
+                                                <span class="ipcontrol-badge ipcontrol-badge-danger">已阻止</span>
+                                                {% endif %}
+                                            </div>
+                                            <div class="ipcontrol-violation-details">
+                                                {% if violation.ip != record.firstLoginIP %}
+                                                <div class="ipcontrol-diff-ip">
+                                                    IP: <code>{{ violation.ip }}</code>
+                                                </div>
+                                                {% endif %}
+                                                {% if violation.ua != record.firstLoginUA %}
+                                                <div class="ipcontrol-diff-ua" title="{{ violation.ua }}">
+                                                    UA: {{ violation.ua[:30] }}{% if violation.ua|length > 30 %}...{% endif %}
+                                                </div>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                        {% endfor %}
+                                        
+                                        {% if record.violations|length > 3 %}
+                                        <div class="ipcontrol-more-violations">
+                                            还有 {{ record.violations|length - 3 }} 条违规记录...
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                                
+                                <td>
+                                    <div class="ipcontrol-last-activity">
+                                        {{ moment(record.lastLoginAt).format('YYYY-MM-DD HH:mm') }}
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- 分页 -->
+                {% if pageCount > 1 %}
+                <div class="ipcontrol-pagination">
+                    <nav class="ipcontrol-pagination-nav">
+                        {% if page > 1 %}
+                        <a href="?page={{ page - 1 }}{% if selectedContestId %}&contestId={{ selectedContestId }}{% endif %}" 
+                           class="ipcontrol-btn ipcontrol-btn-secondary">
+                            <i class="icon icon-chevron-left"></i> 上一页
+                        </a>
+                        {% endif %}
+                        
+                        <span class="ipcontrol-pagination-info">
+                            第 {{ page }} 页，共 {{ pageCount }} 页
+                        </span>
+                        
+                        {% if page < pageCount %}
+                        <a href="?page={{ page + 1 }}{% if selectedContestId %}&contestId={{ selectedContestId }}{% endif %}" 
+                           class="ipcontrol-btn ipcontrol-btn-secondary">
+                            下一页 <i class="icon icon-chevron-right"></i>
+                        </a>
+                        {% endif %}
+                    </nav>
+                </div>
+                {% endif %}
+
+                {% else %}
+                <div class="ipcontrol-empty-state">
+                    <div class="ipcontrol-empty-icon">
+                        <i class="icon icon-shield-check"></i>
+                    </div>
+                    <h3>暂无违规记录</h3>
+                    <p>
+                        {% if selectedContestId %}
+                            该比赛目前没有IP控制违规记录。
+                        {% else %}
+                            目前没有任何IP控制违规记录。
+                        {% endif %}
+                    </p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.ipcontrol-violations-container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.ipcontrol-filters {
+    background: #f8f9fa;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.ipcontrol-filter-form {
+    display: flex;
+    align-items: end;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.ipcontrol-filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ipcontrol-filter-group label {
+    font-weight: bold;
+    color: #333;
+    font-size: 0.9em;
+}
+
+.ipcontrol-select {
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+    min-width: 200px;
+}
+
+.ipcontrol-violations-stats {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 20px;
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.ipcontrol-stat-item {
+    color: #666;
+}
+
+.ipcontrol-table-responsive {
+    overflow-x: auto;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+}
+
+.ipcontrol-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 1000px;
+}
+
+.ipcontrol-table th,
+.ipcontrol-table td {
+    padding: 16px 12px;
+    text-align: left;
+    border-bottom: 1px solid #e0e0e0;
+    vertical-align: top;
+}
+
+.ipcontrol-table th {
+    background: #f8f9fa;
+    font-weight: bold;
+    color: #333;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.ipcontrol-violation-row:hover {
+    background: #f8f9fa;
+}
+
+.ipcontrol-user-info {
+    min-width: 120px;
+}
+
+.ipcontrol-user-link {
+    color: #3aa9de;
+    text-decoration: none;
+    font-weight: bold;
+}
+
+.ipcontrol-user-link:hover {
+    text-decoration: underline;
+}
+
+.ipcontrol-user-id {
+    font-size: 0.8em;
+    color: #999;
+    margin-top: 2px;
+}
+
+.ipcontrol-contest-info {
+    min-width: 150px;
+}
+
+.ipcontrol-contest-link {
+    color: #333;
+    text-decoration: none;
+}
+
+.ipcontrol-contest-link:hover {
+    color: #3aa9de;
+    text-decoration: underline;
+}
+
+.ipcontrol-login-info {
+    font-size: 0.85em;
+    line-height: 1.4;
+    min-width: 200px;
+}
+
+.ipcontrol-login-info > div {
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.ipcontrol-ip code {
+    background: #f1f3f4;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+
+.ipcontrol-time {
+    color: #666;
+}
+
+.ipcontrol-ua {
+    color: #999;
+    font-size: 0.8em;
+}
+
+.ipcontrol-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 100px;
+}
+
+.ipcontrol-stat-badge {
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 0.75em;
+    font-weight: bold;
+    text-align: center;
+}
+
+.ipcontrol-violations-list {
+    max-width: 300px;
+    font-size: 0.85em;
+}
+
+.ipcontrol-violation-item {
+    border: 1px solid #f0f0f0;
+    border-radius: 4px;
+    padding: 8px;
+    margin-bottom: 8px;
+    background: #fafafa;
+}
+
+.ipcontrol-violation-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.ipcontrol-violation-time {
+    font-weight: bold;
+    color: #666;
+    font-size: 0.9em;
+}
+
+.ipcontrol-violation-details > div {
+    margin-bottom: 2px;
+    font-size: 0.85em;
+}
+
+.ipcontrol-diff-ip {
+    color: #e74c3c;
+}
+
+.ipcontrol-diff-ua {
+    color: #f39c12;
+}
+
+.ipcontrol-more-violations {
+    text-align: center;
+    color: #999;
+    font-style: italic;
+    font-size: 0.8em;
+    margin-top: 8px;
+}
+
+.ipcontrol-last-activity {
+    min-width: 120px;
+    color: #666;
+}
+
+.ipcontrol-badge {
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 0.75em;
+    font-weight: bold;
+}
+
+.ipcontrol-badge-info {
+    background: #74b9ff;
+    color: white;
+}
+
+.ipcontrol-badge-danger {
+    background: #ff7675;
+    color: white;
+}
+
+.ipcontrol-pagination {
+    margin-top: 20px;
+    text-align: center;
+}
+
+.ipcontrol-pagination-nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.ipcontrol-pagination-info {
+    color: #666;
+    font-size: 0.9em;
+}
+
+.ipcontrol-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 4px;
+    text-decoration: none;
+    font-size: 0.9em;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.ipcontrol-btn-primary {
+    background: #3aa9de;
+    color: white;
+}
+
+.ipcontrol-btn-primary:hover {
+    background: #2980b9;
+    color: white;
+}
+
+.ipcontrol-btn-secondary {
+    background: #e0e0e0;
+    color: #333;
+}
+
+.ipcontrol-btn-secondary:hover {
+    background: #d0d0d0;
+    color: #333;
+}
+
+.ipcontrol-empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+}
+
+.ipcontrol-empty-icon {
+    font-size: 4em;
+    color: #ddd;
+    margin-bottom: 20px;
+}
+
+.ipcontrol-text-muted {
+    color: #999;
+}
+</style>
+{% endblock %}

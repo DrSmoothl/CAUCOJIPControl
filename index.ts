@@ -1,342 +1,941 @@
-import { Context, Handler, PRIV, ForbiddenError, TokenModel, UserModel } from 'hydrooj';
+import {
+    db, Context, UserModel, Handler, NotFoundError, ForbiddenError, 
+    PRIV, Types, param, ValidationError, DocumentModel
+} from 'hydrooj';
 
-/**
- * IP Control 插件（重写版）
- * 功能：
- * 1. 比赛开关：contest.ipControlEnabled
- * 2. 比赛开始前 1 小时阻止已报名用户登录（并清除其 token）
- * 3. 比赛进行中首次登录绑定 IP+UA，后续变更拒绝
- * 4. 管理页面：开启/关闭、导入 UID 参赛、清除锁
- * 5. 仅影响已报名且开启了 IP 控制的未结束比赛
- */
+// 集合定义
+const ipControlSettingsColl = db.collection('ip_control_settings');
+const ipControlRecordsColl = db.collection('ip_control_records');
+const contestParticipantsColl = db.collection('contest_participants');
 
-// ---------------- 内部状态 ----------------
-let docModel: any; // document model
-let ipLockColl: any; // 记录 (contestDocId, uid) -> { ip, ua }
-let ipAttendColl: any; // 备用参赛记录 (contestId, uid)
-let db: any; // 原始数据库实例 (ctx.db)
-let indexesEnsured = false; // 索引一次性创建
+// 接口定义
+interface IPControlSetting {
+    _id?: any;
+    contestId: any; // 比赛ID
+    enabled: boolean; // 是否启用IP控制
+    preContestLockMinutes: number; // 比赛开始前多少分钟锁定登录
+    strictMode: boolean; // 严格模式：IP和UA都必须一致
+    allowedIPs?: string[]; // 允许的IP范围（可选）
+    createdAt: Date;
+    createdBy: number;
+    updatedAt: Date;
+}
 
-// ---------------- 类型声明 ----------------
-interface IpLockRecord {
-  _id: string; // `${contestDocId}:${uid}`
-  contestId: any; // contest docId (文档内部 id，不一定是字符串)
-  uid: number;
-  ip: string;
-  ua: string;
-  createdAt: Date;
-  updatedAt: Date;
+interface IPControlRecord {
+    _id?: any;
+    uid: number; // 用户ID
+    contestId: any; // 比赛ID
+    firstLoginIP: string; // 首次登录IP
+    firstLoginUA: string; // 首次登录UA
+    firstLoginAt: Date; // 首次登录时间
+    loginCount: number; // 登录次数
+    lastLoginAt: Date; // 最后登录时间
+    violations: Array<{
+        ip: string;
+        ua: string;
+        timestamp: Date;
+        blocked: boolean;
+    }>; // 违规记录
+}
+
+interface ContestParticipant {
+    _id?: any;
+    contestId: any; // 比赛ID
+    uid: number; // 用户ID
+    forced: boolean; // 是否强制参赛
+    addedAt: Date; // 添加时间
+    addedBy: number; // 添加者
 }
 
 declare module 'hydrooj' {
-  interface Collections { ipcontrol_login: IpLockRecord; ipcontrol_attend: { _id?: any; contestId: any; uid: number; createdAt: Date } }
+    interface Model {
+        ipControl: typeof ipControlModel;
+    }
+    interface Collections {
+        ip_control_settings: IPControlSetting;
+        ip_control_records: IPControlRecord;
+        contest_participants: ContestParticipant;
+    }
 }
 
-// ---------------- 日志封装（始终输出） ----------------
-const log = (...a: any[]) => console.log('[IPControl]', ...a);
-const warn = (...a: any[]) => console.warn('[IPControl][WARN]', ...a);
-const err = (...a: any[]) => console.error('[IPControl][ERR]', ...a);
+// IP控制数据模型
+const ipControlModel = {
+    // 创建或更新比赛IP控制设置
+    async setContestIPControl(contestId: any, settings: {
+        enabled: boolean;
+        preContestLockMinutes: number;
+        strictMode: boolean;
+        allowedIPs?: string[];
+    }, operatorId: number): Promise<void> {
+        const setting: IPControlSetting = {
+            contestId,
+            enabled: settings.enabled,
+            preContestLockMinutes: settings.preContestLockMinutes || 60,
+            strictMode: settings.strictMode || true,
+            allowedIPs: settings.allowedIPs || [],
+            createdAt: new Date(),
+            createdBy: operatorId,
+            updatedAt: new Date()
+        };
 
-// ---------------- 工具函数 ----------------
-function normalizeDomainId(d: any): string { return typeof d === 'string' ? d : (d?.domainId || 'system'); }
-function firstIp(raw?: string): string { if (!raw) return ''; const part = raw.split(',')[0].trim(); return part.includes(':') ? part.split(':')[0] : part; }
+        await ipControlSettingsColl.replaceOne(
+            { contestId },
+            setting,
+            { upsert: true }
+        );
+    },
 
-// ================== 采用生产已验证的比赛获取策略 ==================
-// 与 CAUCOJUserBind 保持一致：
-// 1) document.findOne({_id: contestId, docType:30})
-// 2) 如果失败，加载所有 docType:30，字符串匹配 _id
-// 不再使用 docModel.get / 其他集合回退，确保行为一致性。
-async function fetchContest(_domainIdInput: string | any, contestId: any) {
-  if (!db) return null;
-  const documentColl = db.collection('document');
-  let contest: any = null;
-  const idStr = contestId?.toString?.();
-  const attempts: any = { contestId: idStr };
-  try {
-    contest = await documentColl.findOne({ _id: contestId, docType: 30 });
-    if (contest) { attempts.direct = 'hit'; log('fetchContest direct match', { _id: contest._id?.toString?.(), docId: contest.docId }); return contest; }
-    attempts.direct = 'miss';
-  } catch (e) { attempts.direct = 'err'; attempts.directErr = (e as any)?.message; }
-  // 按 _id 转字符串再试（如果传入是 ObjectId）
-  if (!contest && idStr && contestId && contestId._bsontype === 'ObjectID') {
-    try {
-      contest = await documentColl.findOne({ _id: idStr, docType: 30 });
-      if (contest) { attempts.directString = 'hit'; log('fetchContest direct string match', { _id: contest._id?.toString?.(), docId: contest.docId }); return contest; }
-      attempts.directString = 'miss';
-    } catch (e) { attempts.directString = 'err'; attempts.directStringErr = (e as any)?.message; }
-  }
-  // 按 docId 字段（数据库里 docId 为 ObjectId 的情况）
-  if (!contest && idStr && /^[0-9a-fA-F]{24}$/.test(idStr)) {
-    try {
-      const OID = (global as any).Hydro?.db?.bson?.ObjectId;
-      const oid = OID ? new OID(idStr) : idStr;
-      contest = await documentColl.findOne({ docId: oid, docType: 30 });
-      if (contest) { attempts.byDocIdField = 'hit'; log('fetchContest docId field match', { _id: contest._id?.toString?.(), docId: contest.docId }); return contest; }
-      attempts.byDocIdField = 'miss';
-    } catch (e) { attempts.byDocIdField = 'err'; attempts.byDocIdFieldErr = (e as any)?.message; }
-  }
-  // 全表扫描 fallback
-  try {
-    const all = await documentColl.find({ docType: 30 }).project({ _id: 1, docId: 1 }).toArray();
-    attempts.scanCount = all.length;
-    contest = all.find(c => c._id?.toString?.() === idStr || c.docId?.toString?.() === idStr);
-    if (contest) { attempts.scanMatch = 'hit'; log('fetchContest fallback list match', { _id: contest._id?.toString?.(), docId: contest.docId }); return contest; }
-    attempts.scanMatch = 'miss';
-  } catch (e) { attempts.scanErr = (e as any)?.message; }
-  warn('fetchContest not found', attempts);
-  return null;
-}
+    // 获取比赛IP控制设置
+    async getContestIPControl(contestId: any): Promise<IPControlSetting | null> {
+        return await ipControlSettingsColl.findOne({ contestId });
+    },
 
-async function listActive(domainId: string) {
-  if (!db) return [];
-  const documentColl = db.collection('document');
-  const now = new Date();
-  try {
-    const list = await documentColl.find({ docType: 30, ipControlEnabled: true, endAt: { $gt: now } }).toArray();
-    log('listActive contests', list.map(c => ({ id: c._id?.toString?.(), docId: c.docId?.toString?.(), beginAt: c.beginAt, endAt: c.endAt, ipControlEnabled: c.ipControlEnabled })));
-    return list;
-  } catch (e) { err('listActive error', e); return []; }
-}
+    // 检查用户是否参加了需要IP控制的比赛
+    async getUserIPControlContests(uid: number): Promise<IPControlSetting[]> {
+        // 获取用户参加的所有比赛
+        const userContests = await db.collection('document.status').find({
+            uid,
+            docType: 30, // 比赛类型
+            attend: 1
+        }).toArray();
 
-async function shouldBlockLogin(domainId: string, uid: number) {
-  const contests = await listActive(domainId);
-  if (!contests.length) return { block: false };
-  const docIds = contests.map(c => c.docId).filter(id => id !== undefined);
-  let attended: any[] = [];
-  if (docModel && docIds.length) {
-    try {
-      attended = await docModel.getMultiStatus(domainId, docModel.TYPE_CONTEST, { uid, docId: { $in: docIds }, attend: 1 }).project({ docId: 1 }).toArray();
-    } catch (e) { err('getMultiStatus error', e); }
-  }
-  if (!attended.length) return { block: false };
-  const now = Date.now();
-  for (const c of contests) {
-    const begin = new Date(c.beginAt).getTime();
-    if (now < begin && now >= begin - 3600_000) {
-      if (attended.find(a => a.docId?.toString?.() === c.docId?.toString?.())) {
-        return { block: true, reason: '比赛开始前一小时禁止登录（IP控制）' };
-      }
-    }
-  }
-  return { block: false };
-}
-
-async function verifyDuringContest(domainId: string, uid: number, ip: string, ua: string) {
-  const contests = await listActive(domainId);
-  if (!contests.length) { log('verifyDuringContest no active contests'); return; }
-  const docIds = contests.map(c => c.docId).filter(id => id !== undefined);
-  let attended: any[] = [];
-  if (docModel && docIds.length) {
-    try { attended = await docModel.getMultiStatus(domainId, docModel.TYPE_CONTEST, { uid, docId: { $in: docIds }, attend: 1 }).project({ docId: 1 }).toArray(); } catch (e) { err('getMultiStatus error', e); }
-  }
-  const attendedStrSet = new Set(attended.map(a => a.docId?.toString?.()));
-  log('verifyDuringContest status', { uid, contests: contests.map(c => c.docId?.toString?.()), attended: Array.from(attendedStrSet) });
-  const now = Date.now();
-  for (const c of contests) {
-    const beginTs = new Date(c.beginAt).getTime();
-    const endTs = new Date(c.endAt).getTime();
-    const inWindow = now >= beginTs && now <= endTs;
-    const docIdStr = c.docId?.toString?.();
-    log('contestCheck', { docId: docIdStr, beginTs, endTs, now, inWindow });
-    if (!inWindow) continue;
-    let isAttended = attendedStrSet.has(docIdStr);
-    if (!isAttended && ipAttendColl) {
-      try {
-        const fallbackAttend = await ipAttendColl.findOne({ contestId: c.docId, uid });
-        if (fallbackAttend) { isAttended = true; log('fallbackAttend hit', { uid, contest: docIdStr }); }
-      } catch (e) { warn('fallbackAttend query failed', e); }
-    }
-    if (!isAttended) { log('skip lock (not attended)', { uid, contest: docIdStr }); continue; }
-    const key = `${c.docId}:${uid}`;
-    let rec: IpLockRecord | null = await ipLockColl.findOne({ _id: key });
-    if (!rec) {
-      const newRec: IpLockRecord = { _id: key, contestId: c.docId, uid, ip, ua, createdAt: new Date(), updatedAt: new Date() };
-      try { await ipLockColl.insertOne(newRec); log('lock inserted', { key, ip, ua }); } catch (e) { err('lock insert failed', e); }
-    } else if (rec.ip !== ip || rec.ua !== ua) {
-      log('reject ip/ua change', { contest: docIdStr, uid, oldIp: rec.ip, newIp: ip, oldUa: rec.ua, newUa: ua });
-      throw new ForbiddenError('IP/UA 与首次登录不一致，比赛已启用 IP 控制');
-    } else {
-      try { await ipLockColl.updateOne({ _id: key }, { $set: { updatedAt: new Date() } }); } catch {/* ignore */}
-    }
-  }
-}
-
-// ---------------- 路由 Handler ----------------
-class ManageHandler extends Handler {
-  async get(domainIdParam: string) {
-    this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
-    const { contestId } = this.request.params;
-    const contest = await fetchContest(domainIdParam, contestId);
-    if (!contest) throw new ForbiddenError('比赛不存在');
-    let imported = 0;
-    if (docModel && contest.docId !== undefined) {
-      try { imported = await docModel.countStatus(domainIdParam, docModel.TYPE_CONTEST, { docId: contest.docId, attend: 1 }); } catch { /* ignore */ }
-    }
-    if (!imported && ipAttendColl && contest.docId !== undefined) {
-      try { imported = await ipAttendColl.countDocuments({ contestId: contest.docId }); } catch { /* ignore */ }
-    }
-    const beginAtStr = contest.beginAt ? new Date(contest.beginAt).toISOString().replace('T',' ').substring(0,19) : '';
-    const endAtStr = contest.endAt ? new Date(contest.endAt).toISOString().replace('T',' ').substring(0,19) : '';
-    // 查询当前锁
-    let locks: any[] = [];
-    try {
-      if (contest.docId !== undefined) {
-        locks = await ipLockColl.find({ contestId: contest.docId }).sort({ updatedAt: -1 }).toArray();
-      }
-    } catch (e) { warn('query locks failed', e); }
-    const lockView = [] as any[];
-    for (const r of locks) {
-      const createdAtStr = r.createdAt ? new Date(r.createdAt).toISOString().replace('T',' ').substring(0,19) : '';
-      const updatedAtStr = r.updatedAt ? new Date(r.updatedAt).toISOString().replace('T',' ').substring(0,19) : '';
-      lockView.push({ uid: r.uid, ip: r.ip, ua: r.ua, createdAtStr, updatedAtStr });
-    }
-    this.response.template = 'ipcontrol_contest_manage.html';
-    this.response.body = { contest, imported, beginAtStr, endAtStr, locks: lockView };
-  }
-  async post(domainIdParam: string) {
-    this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
-    const { contestId } = this.request.params;
-    const contest = await fetchContest(domainIdParam, contestId);
-    if (!contest) throw new ForbiddenError('比赛不存在');
-    const { action } = this.request.body;
-    if (action === 'toggle') {
-      const enable = this.request.body.enabled === 'true';
-      let modelOk = false; let directOk = false; let matched = 0; let modified = 0;
-      if (docModel && contest.docId !== undefined) {
-        try { await docModel.set(domainIdParam, docModel.TYPE_CONTEST, contest.docId, { ipControlEnabled: enable } as any); modelOk = true; } catch (e) { warn('docModel.set failed', e); }
-      }
-      try {
-        const res = await db.collection('document').updateOne({ _id: contest._id }, { $set: { ipControlEnabled: enable } });
-        matched = res.matchedCount || 0; modified = res.modifiedCount || 0; directOk = modified > 0 || matched > 0;
-      } catch (e) { err('direct update ipControlEnabled failed', e); }
-      log('toggle', { contest: contest.docId, enable, modelOk, directOk, matched, modified });
-      this.response.redirect = `/contest/${contestId}/ipcontrol`;
-      return;
-    }
-    if (action === 'import_uids') {
-      const text: string = this.request.body.uidsText || '';
-      const list: number[] = [];
-      text.split(/[\s,;]+/).forEach(t => { if (/^\d+$/.test(t)) list.push(+t); });
-      const results: any[] = [];
-      if (docModel && contest.docId !== undefined) {
-        for (const uid of list) {
-          const attempts: any = { uid };
-          try {
-            await docModel.setStatus(domainIdParam, docModel.TYPE_CONTEST, contest.docId, uid, { attend: 1, subscribe: 1 } as any);
-            attempts.byDocId = 'ok';
-          } catch (e) { attempts.byDocId = 'err'; attempts.byDocIdErr = (e as any)?.message; }
-          const docIdStr = contest.docId?.toString?.();
-          const rawIdStr = contest._id?.toString?.();
-            if (rawIdStr && docIdStr && rawIdStr !== docIdStr) {
-              try {
-                await docModel.setStatus(domainIdParam, docModel.TYPE_CONTEST, contest._id, uid, { attend: 1, subscribe: 1 } as any);
-                attempts.byRawId = 'ok';
-              } catch (e) { attempts.byRawId = 'err'; attempts.byRawIdErr = (e as any)?.message; }
-            }
-          try {
-            const st = await docModel.getMultiStatus(domainIdParam, docModel.TYPE_CONTEST, { uid, docId: { $in: [contest.docId, contest._id] }, attend: 1 }).project({ docId:1 }).toArray();
-            attempts.verifyCount = st.length;
-          } catch (e) { attempts.verifyErr = (e as any)?.message; }
-          // 备用集合写入
-          if (ipAttendColl) {
-            try { await ipAttendColl.updateOne({ contestId: contest.docId, uid }, { $setOnInsert: { createdAt: new Date() } }, { upsert: true }); attempts.fallbackMark = 'ok'; } catch (e) { attempts.fallbackMark = 'err'; attempts.fallbackErr = (e as any)?.message; }
-          }
-          results.push(attempts);
+        if (userContests.length === 0) {
+            return [];
         }
-      }
-      let importedActual = 0;
-      try { if (docModel && contest.docId !== undefined) importedActual = await docModel.countStatus(domainIdParam, docModel.TYPE_CONTEST, { docId: contest.docId, attend: 1 }); } catch {}
-      if (!importedActual && ipAttendColl) {
-        try { importedActual = await ipAttendColl.countDocuments({ contestId: contest.docId }); } catch {}
-      }
-      log('import uids', { contest: contest.docId, requested: list.length, results, importedActual });
-      this.response.redirect = `/contest/${contestId}/ipcontrol`;
-      return;
+
+        const contestIds = userContests.map(contest => contest.docId);
+        
+        // 获取这些比赛中启用了IP控制的
+        const ipControlContests = await ipControlSettingsColl.find({
+            contestId: { $in: contestIds },
+            enabled: true
+        }).toArray();
+
+        return ipControlContests;
+    },
+
+    // 检查比赛是否在锁定时间内
+    async isContestInLockPeriod(contestId: any): Promise<boolean> {
+        const documentColl = db.collection('document');
+        let contest: any = null;
+        
+        // 尝试多种查询方式
+        try {
+            // 方式1: 直接查询
+            contest = await documentColl.findOne({
+                _id: contestId,
+                docType: 30 // 比赛文档类型
+            });
+        } catch (error) {
+            // 查询失败，继续尝试其他方式
+        }
+        
+        // 方式2: 如果直接查询失败，尝试字符串匹配
+        if (!contest) {
+            try {
+                const allContests = await documentColl.find({ docType: 30 }).toArray();
+                
+                // 尝试字符串匹配
+                contest = allContests.find(c => {
+                    return c._id.toString() === contestId.toString();
+                }) || null;
+            } catch (error) {
+                // 查询失败
+            }
+        }
+
+        if (!contest) {
+            return false;
+        }
+
+        const setting = await this.getContestIPControl(contestId);
+        if (!setting || !setting.enabled) {
+            return false;
+        }
+
+        const now = new Date();
+        const contestStart = new Date(contest.beginAt);
+        const lockStart = new Date(contestStart.getTime() - setting.preContestLockMinutes * 60 * 1000);
+
+        return now >= lockStart && now < contestStart;
+    },
+
+    // 检查用户是否应该被阻止登录
+    async shouldBlockUserLogin(uid: number): Promise<{ blocked: boolean; reason?: string }> {
+        const ipControlContests = await this.getUserIPControlContests(uid);
+        
+        if (ipControlContests.length === 0) {
+            return { blocked: false };
+        }
+
+        // 检查是否有比赛在锁定期内
+        for (const setting of ipControlContests) {
+            const inLockPeriod = await this.isContestInLockPeriod(setting.contestId);
+            if (inLockPeriod) {
+                return { 
+                    blocked: true, 
+                    reason: '您参加的比赛即将开始，现在禁止登录。请在比赛开始后重新登录。' 
+                };
+            }
+        }
+
+        return { blocked: false };
+    },
+
+    // 记录用户登录IP和UA
+    async recordUserLogin(uid: number, ip: string, ua: string): Promise<void> {
+        const ipControlContests = await this.getUserIPControlContests(uid);
+        
+        if (ipControlContests.length === 0) {
+            return;
+        }
+
+        for (const setting of ipControlContests) {
+            // 检查比赛是否已开始但未结束
+            const documentColl = db.collection('document');
+            let contest: any = null;
+            
+            // 尝试多种查询方式查找比赛
+            try {
+                // 方式1: 直接查询
+                contest = await documentColl.findOne({
+                    _id: setting.contestId,
+                    docType: 30 // 比赛文档类型
+                });
+            } catch (error) {
+                // 查询失败，继续尝试其他方式
+            }
+            
+            // 方式2: 如果直接查询失败，尝试字符串匹配
+            if (!contest) {
+                try {
+                    const allContests = await documentColl.find({ docType: 30 }).toArray();
+                    
+                    // 尝试字符串匹配
+                    contest = allContests.find(c => {
+                        return c._id.toString() === setting.contestId.toString();
+                    }) || null;
+                } catch (error) {
+                    // 查询失败
+                }
+            }
+
+            if (!contest) continue;
+
+            const now = new Date();
+            const contestStart = new Date(contest.beginAt);
+            const contestEnd = new Date(contest.endAt);
+
+            // 只在比赛进行期间记录
+            if (now >= contestStart && now <= contestEnd) {
+                const existingRecord = await ipControlRecordsColl.findOne({
+                    uid,
+                    contestId: setting.contestId
+                });
+
+                if (existingRecord) {
+                    // 更新现有记录
+                    await ipControlRecordsColl.updateOne(
+                        { _id: existingRecord._id },
+                        {
+                            $set: {
+                                lastLoginAt: now
+                            },
+                            $inc: {
+                                loginCount: 1
+                            }
+                        }
+                    );
+                } else {
+                    // 创建新记录
+                    await ipControlRecordsColl.insertOne({
+                        uid,
+                        contestId: setting.contestId,
+                        firstLoginIP: ip,
+                        firstLoginUA: ua,
+                        firstLoginAt: now,
+                        loginCount: 1,
+                        lastLoginAt: now,
+                        violations: []
+                    });
+                }
+            }
+        }
+    },
+
+    // 检查登录IP/UA是否与首次登录一致
+    async checkLoginConsistency(uid: number, ip: string, ua: string): Promise<{ allowed: boolean; reason?: string }> {
+        const ipControlContests = await this.getUserIPControlContests(uid);
+        
+        if (ipControlContests.length === 0) {
+            return { allowed: true };
+        }
+
+        for (const setting of ipControlContests) {
+            // 检查比赛是否进行中
+            const documentColl = db.collection('document');
+            let contest: any = null;
+            
+            // 尝试多种查询方式查找比赛
+            try {
+                // 方式1: 直接查询
+                contest = await documentColl.findOne({
+                    _id: setting.contestId,
+                    docType: 30 // 比赛文档类型
+                });
+            } catch (error) {
+                // 查询失败，继续尝试其他方式
+            }
+            
+            // 方式2: 如果直接查询失败，尝试字符串匹配
+            if (!contest) {
+                try {
+                    const allContests = await documentColl.find({ docType: 30 }).toArray();
+                    
+                    // 尝试字符串匹配
+                    contest = allContests.find(c => {
+                        return c._id.toString() === setting.contestId.toString();
+                    }) || null;
+                } catch (error) {
+                    // 查询失败
+                }
+            }
+
+            if (!contest) continue;
+
+            const now = new Date();
+            const contestStart = new Date(contest.beginAt);
+            const contestEnd = new Date(contest.endAt);
+
+            // 只在比赛进行期间检查
+            if (now >= contestStart && now <= contestEnd) {
+                const record = await ipControlRecordsColl.findOne({
+                    uid,
+                    contestId: setting.contestId
+                });
+
+                if (record) {
+                    const ipMatches = record.firstLoginIP === ip;
+                    const uaMatches = record.firstLoginUA === ua;
+
+                    if (setting.strictMode) {
+                        // 严格模式：IP和UA都必须一致
+                        if (!ipMatches || !uaMatches) {
+                            // 记录违规
+                            await ipControlRecordsColl.updateOne(
+                                { _id: record._id },
+                                {
+                                    $push: {
+                                        violations: {
+                                            ip,
+                                            ua,
+                                            timestamp: now,
+                                            blocked: true
+                                        }
+                                    }
+                                }
+                            );
+
+                            return {
+                                allowed: false,
+                                reason: `检测到您的登录环境发生变化，为保证比赛公平性，禁止登录。首次登录IP: ${record.firstLoginIP}，当前IP: ${ip}`
+                            };
+                        }
+                    } else {
+                        // 宽松模式：只检查IP
+                        if (!ipMatches) {
+                            // 记录违规
+                            await ipControlRecordsColl.updateOne(
+                                { _id: record._id },
+                                {
+                                    $push: {
+                                        violations: {
+                                            ip,
+                                            ua,
+                                            timestamp: now,
+                                            blocked: true
+                                        }
+                                    }
+                                }
+                            );
+
+                            return {
+                                allowed: false,
+                                reason: `检测到您的IP地址发生变化，为保证比赛公平性，禁止登录。首次登录IP: ${record.firstLoginIP}，当前IP: ${ip}`
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        return { allowed: true };
+    },
+
+    // 强制用户参加比赛
+    async forceUserToContest(contestId: any, uids: number[], operatorId: number): Promise<{ success: number; failed: number[] }> {
+        let success = 0;
+        const failed: number[] = [];
+
+        for (const uid of uids) {
+            try {
+                // 检查用户是否存在
+                const user = await UserModel.getById('system', uid);
+                if (!user) {
+                    failed.push(uid);
+                    continue;
+                }
+
+                // 检查是否已经参加
+                const existingStatus = await db.collection('document.status').findOne({
+                    docType: 30,
+                    uid,
+                    docId: contestId
+                });
+
+                if (!existingStatus) {
+                    // 创建参赛状态
+                    await db.collection('document.status').insertOne({
+                        docType: 30,
+                        uid,
+                        domainId: 'system',
+                        docId: contestId,
+                        attend: 1,
+                        subscribe: 1
+                    });
+
+                    // 更新比赛参与人数
+                    await db.collection('document').updateOne(
+                        { _id: contestId, docType: 30 },
+                        { $inc: { attend: 1 } }
+                    );
+                } else if (existingStatus.attend !== 1) {
+                    // 更新现有状态
+                    await db.collection('document.status').updateOne(
+                        { _id: existingStatus._id },
+                        { $set: { attend: 1, subscribe: 1 } }
+                    );
+
+                    // 更新比赛参与人数（如果之前没有参加）
+                    await db.collection('document').updateOne(
+                        { _id: contestId, docType: 30 },
+                        { $inc: { attend: 1 } }
+                    );
+                }
+
+                // 记录强制参赛信息
+                await contestParticipantsColl.replaceOne(
+                    { contestId, uid },
+                    {
+                        contestId,
+                        uid,
+                        forced: true,
+                        addedAt: new Date(),
+                        addedBy: operatorId
+                    },
+                    { upsert: true }
+                );
+
+                success++;
+            } catch (error) {
+                failed.push(uid);
+            }
+        }
+
+        return { success, failed };
+    },
+
+    // 获取比赛的强制参赛用户列表
+    async getForcedParticipants(contestId: any): Promise<any[]> {
+        const participants = await contestParticipantsColl.find({
+            contestId,
+            forced: true
+        }).toArray();
+
+        const result: any[] = [];
+        for (const participant of participants) {
+            const user = await UserModel.getById('system', participant.uid);
+            if (user) {
+                result.push({
+                    uid: participant.uid,
+                    uname: user.uname,
+                    addedAt: participant.addedAt,
+                    addedBy: participant.addedBy
+                });
+            }
+        }
+
+        return result;
+    },
+
+    // 移除强制参赛用户
+    async removeForcedParticipant(contestId: any, uid: number): Promise<void> {
+        // 移除强制参赛记录
+        await contestParticipantsColl.deleteOne({
+            contestId,
+            uid,
+            forced: true
+        });
+
+        // 移除参赛状态
+        const statusResult = await db.collection('document.status').deleteOne({
+            docType: 30,
+            uid,
+            docId: contestId
+        });
+
+        // 如果成功移除状态，更新比赛参与人数
+        if (statusResult.deletedCount > 0) {
+            await db.collection('document').updateOne(
+                { _id: contestId, docType: 30 },
+                { $inc: { attend: -1 } }
+            );
+        }
+    },
+
+    // 获取IP控制违规记录
+    async getViolationRecords(contestId?: any, page: number = 1, limit: number = 20): Promise<{
+        records: any[];
+        total: number;
+        pageCount: number;
+    }> {
+        const skip = (page - 1) * limit;
+        let query: any = {};
+
+        if (contestId) {
+            query.contestId = contestId;
+        }
+
+        // 只查询有违规记录的
+        query['violations.0'] = { $exists: true };
+
+        const total = await ipControlRecordsColl.countDocuments(query);
+        const records = await ipControlRecordsColl.find(query)
+            .sort({ lastLoginAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+
+        // 补充用户信息和比赛信息
+        for (const record of records) {
+            const user = await UserModel.getById('system', record.uid);
+            (record as any).user = user ? { _id: user._id, uname: user.uname } : null;
+
+            const contest = await db.collection('document').findOne({
+                _id: record.contestId,
+                docType: 30
+            });
+            (record as any).contest = contest ? { _id: contest._id, title: contest.title } : null;
+        }
+
+        return {
+            records,
+            total,
+            pageCount: Math.ceil(total / limit)
+        };
+    },
+
+    // 清除用户登录Token（强制下线）
+    async clearUserTokens(uid: number): Promise<void> {
+        await db.collection('token').deleteMany({ 
+            uid, 
+            tokenType: 0  // 登录token类型
+        });
+    },
+
+    // 获取所有启用IP控制的比赛
+    async getIPControlContests(): Promise<any[]> {
+        const settings = await ipControlSettingsColl.find({ enabled: true }).toArray();
+        const result: any[] = [];
+
+        for (const setting of settings) {
+            const documentColl = db.collection('document');
+            let contest: any = null;
+            
+            // 尝试多种查询方式查找比赛
+            try {
+                // 方式1: 直接查询
+                contest = await documentColl.findOne({
+                    _id: setting.contestId,
+                    docType: 30 // 比赛文档类型
+                });
+            } catch (error) {
+                // 查询失败，继续尝试其他方式
+            }
+            
+            // 方式2: 如果直接查询失败，尝试字符串匹配
+            if (!contest) {
+                try {
+                    const allContests = await documentColl.find({ docType: 30 }).toArray();
+                    
+                    // 尝试字符串匹配
+                    contest = allContests.find(c => {
+                        return c._id.toString() === setting.contestId.toString();
+                    }) || null;
+                } catch (error) {
+                    // 查询失败
+                }
+            }
+
+            if (contest) {
+                result.push({
+                    contestId: setting.contestId,
+                    title: contest.title,
+                    beginAt: contest.beginAt,
+                    endAt: contest.endAt,
+                    setting
+                });
+            }
+        }
+
+        return result;
     }
-    if (action === 'clear_locks') {
-      await ipLockColl.deleteMany({ contestId: contest.docId });
-      log('clear locks', { contest: contest.docId });
-      this.response.redirect = `/contest/${contestId}/ipcontrol`;
-      return;
+};
+
+global.Hydro.model.ipControl = ipControlModel;
+
+// IP控制管理主页
+class IPControlMainHandler extends Handler {
+    async get() {
+        this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
+        
+        // 获取所有启用IP控制的比赛
+        const ipControlContests = await ipControlModel.getIPControlContests();
+        
+        // 获取最近的违规记录
+        const { records: recentViolations } = await ipControlModel.getViolationRecords(undefined, 1, 10);
+        
+        this.response.template = 'ip_control_main.html';
+        this.response.body = {
+            ipControlContests,
+            recentViolations
+        };
     }
-    if (action === 'unlock_lock') {
-      const uid = Number(this.request.body.uid);
-      if (!Number.isFinite(uid)) {
-        this.response.redirect = `/contest/${contestId}/ipcontrol`;
-        return;
-      }
-      const keyPrefix = `${contest.docId}:${uid}`;
-      try {
-        await ipLockColl.deleteOne({ _id: keyPrefix });
-        log('unlock single', { contest: contest.docId, uid });
-      } catch (e) { err('unlock single failed', e); }
-      this.response.redirect = `/contest/${contestId}/ipcontrol`;
-      return;
-    }
-    this.response.redirect = `/contest/${contestId}/ipcontrol`;
-  }
 }
 
-// ---------------- 入口 ----------------
-export async function apply(ctx: Context) {
-  // 初始化 model & collection
-  if (!docModel) docModel = (global as any).Hydro?.model?.document || (global as any).Hydro?.model?.doc || (global as any).Hydro?.model?.Document;
-  if (!ipLockColl) { ipLockColl = ctx.db.collection('ipcontrol_login'); log('ipLock collection ready'); }
-  if (!ipAttendColl) { ipAttendColl = ctx.db.collection('ipcontrol_attend'); }
-  if (!indexesEnsured) {
-    try {
-      await ctx.db.ensureIndexes(
-        ipLockColl,
-        { key: { contestId: 1, uid: 1 }, name: 'contest_user' },
-        { key: { createdAt: 1 }, name: 'createdAt' },
-      );
-      await ctx.db.ensureIndexes(
-        ipAttendColl,
-        { key: { contestId: 1, uid: 1 }, name: 'contest_user_unique', unique: false },
-      );
-      indexesEnsured = true;
-    } catch (e) { err('ensureIndexes failed', e); }
-  }
-  log('plugin initialized');
+// 比赛IP控制设置
+class ContestIPControlHandler extends Handler {
+    async get() {
+        this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
+        const { contestId } = this.request.params;
+        
+        if (!contestId) {
+            throw new NotFoundError('比赛ID无效');
+        }
 
-  // 管理路由
-  ctx.Route('ipcontrol_contest_manage', '/contest/:contestId/ipcontrol', ManageHandler, PRIV.PRIV_EDIT_SYSTEM);
-  log('route registered /contest/:contestId/ipcontrol');
+        // 获取比赛信息
+        const documentColl = db.collection('document');
+        let contest: any = null;
+        
+        // 尝试多种查询方式查找比赛
+        try {
+            // 方式1: 直接查询
+            contest = await documentColl.findOne({
+                _id: contestId,
+                docType: 30 // 比赛文档类型
+            });
+        } catch (error) {
+            // 查询失败，继续尝试其他方式
+        }
+        
+        // 方式2: 如果直接查询失败，尝试字符串匹配
+        if (!contest) {
+            try {
+                const allContests = await documentColl.find({ docType: 30 }).toArray();
+                
+                // 尝试字符串匹配
+                contest = allContests.find(c => {
+                    return c._id.toString() === contestId.toString();
+                }) || null;
+            } catch (error) {
+                // 查询失败
+            }
+        }
 
-  const beforeLoginHandler = async (h: any) => {
-    log('beforeLoginHook hit', { uname: h.args?.uname, domainId: h.args?.domainId });
-    const uname = h.args.uname;
-    let udoc = await UserModel.getByEmail(h.args.domainId, uname) || await UserModel.getByUname(h.args.domainId, uname);
-    if (!udoc) { log('beforeLoginHook user not found'); return; }
-    const domainId = h.args.domainId || 'system';
-    try {
-      const { block, reason } = await shouldBlockLogin(domainId, udoc._id);
-      if (block) {
-        await TokenModel.delByUid(udoc._id);
-        log('block pre-contest login', { uid: udoc._id, reason });
-        throw new ForbiddenError(reason || '登录被 IP 控制策略阻止');
-      }
-    } catch (e) { err('before login hook error', e); throw e; }
-  };
+        if (!contest) {
+            throw new NotFoundError('比赛不存在');
+        }
 
-  const afterLoginHandler = async (h: any) => {
-    const uid = h.user?._id; if (!uid) { log('afterLoginHook no uid'); return; }
-    const domainId = h.args.domainId || 'system';
-    const ip = firstIp(h.request.ip || h.request.headers['x-forwarded-for']);
-    const ua = h.request.headers['user-agent'] || '';
-    log('afterLoginHook attempt lock', { uid, ip, ua, domainId });
-    try { await verifyDuringContest(domainId, uid, ip, ua); } catch (e) { if (!(e instanceof ForbiddenError)) err('after login verify error', e); throw e; }
-  };
+        // 获取IP控制设置
+        const setting = await ipControlModel.getContestIPControl(contestId);
 
-  // 原始事件
-  ctx.on('handler/before/UserLogin#post', beforeLoginHandler);
-  ctx.on('handler/after/UserLogin#post', afterLoginHandler);
-  // 额外可能名称（容错）
-  ctx.on('handler/after/UserLogin', afterLoginHandler);
-  ctx.on('handler/after/user.login#post', afterLoginHandler);
-  ctx.on('handler/after/user.login', afterLoginHandler);
-  ctx.on('handler/before/UserLogin', beforeLoginHandler);
-  ctx.on('handler/before/user.login#post', beforeLoginHandler);
-  ctx.on('handler/before/user.login', beforeLoginHandler);
-  log('login hooks registered (multiple variants)');
+        // 获取强制参赛用户列表
+        const forcedParticipants = await ipControlModel.getForcedParticipants(contestId);
+
+        // 检查是否有成功消息
+        const { success, message } = this.request.query;
+
+        this.response.template = 'contest_ip_control.html';
+        this.response.body = {
+            contest,
+            setting: setting || {
+                enabled: false,
+                preContestLockMinutes: 60,
+                strictMode: true,
+                allowedIPs: []
+            },
+            forcedParticipants,
+            success: success === '1',
+            message: message ? decodeURIComponent(message as string) : null
+        };
+    }
+
+    async post() {
+        this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
+        const { contestId } = this.request.params;
+        const { 
+            action, 
+            enabled, 
+            preContestLockMinutes, 
+            strictMode, 
+            allowedIPs,
+            uidsText,
+            uidToRemove
+        } = this.request.body;
+
+        if (!contestId) {
+            throw new NotFoundError('比赛ID无效');
+        }
+
+        try {
+            if (action === 'save_settings') {
+                // 保存IP控制设置
+                const settings = {
+                    enabled: enabled === 'true',
+                    preContestLockMinutes: parseInt(preContestLockMinutes) || 60,
+                    strictMode: strictMode === 'true',
+                    allowedIPs: allowedIPs ? allowedIPs.split('\n').map((ip: string) => ip.trim()).filter(Boolean) : []
+                };
+
+                await ipControlModel.setContestIPControl(contestId, settings, this.user._id);
+
+                this.response.redirect = `/contest/${contestId}/ip-control?success=1&message=${encodeURIComponent('IP控制设置已保存')}`;
+                
+            } else if (action === 'add_participants') {
+                // 添加强制参赛用户
+                if (!uidsText || !uidsText.trim()) {
+                    throw new Error('请输入用户ID列表');
+                }
+
+                const uids: number[] = [];
+                const lines = uidsText.trim().split('\n');
+                
+                for (const line of lines) {
+                    const uid = parseInt(line.trim());
+                    if (!isNaN(uid) && uid > 0) {
+                        uids.push(uid);
+                    }
+                }
+
+                if (uids.length === 0) {
+                    throw new Error('没有有效的用户ID');
+                }
+
+                const result = await ipControlModel.forceUserToContest(contestId, uids, this.user._id);
+
+                let message = `成功添加 ${result.success} 个用户`;
+                if (result.failed.length > 0) {
+                    message += `，失败 ${result.failed.length} 个：${result.failed.join(', ')}`;
+                }
+
+                this.response.redirect = `/contest/${contestId}/ip-control?success=1&message=${encodeURIComponent(message)}`;
+                
+            } else if (action === 'remove_participant') {
+                // 移除强制参赛用户
+                if (!uidToRemove) {
+                    throw new Error('请指定要移除的用户ID');
+                }
+
+                const uid = parseInt(uidToRemove);
+                if (isNaN(uid)) {
+                    throw new Error('用户ID无效');
+                }
+
+                await ipControlModel.removeForcedParticipant(contestId, uid);
+
+                this.response.redirect = `/contest/${contestId}/ip-control?success=1&message=${encodeURIComponent('用户已移除')}`;
+            }
+
+        } catch (error: any) {
+            const documentColl = db.collection('document');
+            let contest: any = null;
+            
+            // 尝试多种查询方式查找比赛
+            try {
+                // 方式1: 直接查询
+                contest = await documentColl.findOne({
+                    _id: contestId,
+                    docType: 30 // 比赛文档类型
+                });
+            } catch (err) {
+                // 查询失败，继续尝试其他方式
+            }
+            
+            // 方式2: 如果直接查询失败，尝试字符串匹配
+            if (!contest) {
+                try {
+                    const allContests = await documentColl.find({ docType: 30 }).toArray();
+                    
+                    // 尝试字符串匹配
+                    contest = allContests.find(c => {
+                        return c._id.toString() === contestId.toString();
+                    }) || null;
+                } catch (err) {
+                    // 查询失败
+                }
+            }
+
+            const setting = await ipControlModel.getContestIPControl(contestId);
+            const forcedParticipants = await ipControlModel.getForcedParticipants(contestId);
+
+            this.response.template = 'contest_ip_control.html';
+            this.response.body = {
+                contest,
+                setting: setting || {
+                    enabled: false,
+                    preContestLockMinutes: 60,
+                    strictMode: true,
+                    allowedIPs: []
+                },
+                forcedParticipants,
+                error: error.message,
+                formData: this.request.body
+            };
+        }
+    }
+}
+
+// 违规记录查看
+class ViolationRecordsHandler extends Handler {
+    async get() {
+        this.checkPriv(PRIV.PRIV_EDIT_SYSTEM);
+        
+        const page = +(this.request.query.page || '1');
+        const contestId = this.request.query.contestId as string;
+        
+        const { records, total, pageCount } = await ipControlModel.getViolationRecords(
+            contestId, page, 20
+        );
+
+        // 获取所有启用IP控制的比赛（用于筛选）
+        const ipControlContests = await ipControlModel.getIPControlContests();
+
+        this.response.template = 'violation_records.html';
+        this.response.body = {
+            records,
+            total,
+            pageCount,
+            page,
+            selectedContestId: contestId,
+            ipControlContests
+        };
+    }
+}
+
+// 注册路由和事件监听器
+export function apply(ctx: Context) {
+    // 注册模型
+    global.Hydro.model.ipControl = ipControlModel;
+
+    // 注册路由
+    ctx.Route('ip_control_main', '/ip-control', IPControlMainHandler, PRIV.PRIV_EDIT_SYSTEM);
+    ctx.Route('contest_ip_control', '/contest/:contestId/ip-control', ContestIPControlHandler, PRIV.PRIV_EDIT_SYSTEM);
+    ctx.Route('violation_records', '/ip-control/violations', ViolationRecordsHandler, PRIV.PRIV_EDIT_SYSTEM);
+
+    // 监听用户登录前事件 - 检查是否在锁定期
+    ctx.on('handler/before/UserLogin#post', async (that) => {
+        const { uname } = that.args;
+        
+        // 获取用户信息
+        let udoc = await UserModel.getByEmail(that.args.domainId, uname);
+        if (!udoc) {
+            const user = await UserModel.getByUname(that.args.domainId, uname);
+            if (user) udoc = user;
+        }
+        
+        if (udoc) {
+            // 检查是否应该阻止登录
+            const { blocked, reason } = await ipControlModel.shouldBlockUserLogin(udoc._id);
+            if (blocked) {
+                throw new ForbiddenError(reason || '登录被阻止');
+            }
+        }
+    });
+
+    // 监听用户登录后事件 - 记录IP和检查一致性
+    ctx.on('handler/after/UserLogin#post', async (that) => {
+        if (that.response.redirect && that.user) {
+            const ip = that.request.ip;
+            const ua = that.request.headers['user-agent'] || '';
+            
+            // 检查登录一致性
+            const { allowed, reason } = await ipControlModel.checkLoginConsistency(
+                that.user._id, ip, ua
+            );
+            
+            if (!allowed) {
+                // 清除登录Token，强制下线
+                await ipControlModel.clearUserTokens(that.user._id);
+                throw new ForbiddenError(reason || '登录环境检查失败');
+            }
+            
+            // 记录登录信息
+            await ipControlModel.recordUserLogin(that.user._id, ip, ua);
+        }
+    });
+
+    // 监听比赛参加事件 - 检查IP控制参赛权限
+    ctx.on('handler/before/ContestDetailHandler#postAttend', async (that) => {
+        const { domainId, tid: contestId } = that.args;
+        const userId = that.user._id;
+        
+        // 检查比赛是否启用了IP控制
+        const setting = await ipControlModel.getContestIPControl(contestId);
+        if (setting && setting.enabled) {
+            // 如果启用了IP控制，检查用户是否在强制参赛列表中
+            const forcedParticipant = await contestParticipantsColl.findOne({
+                contestId,
+                uid: userId,
+                forced: true
+            });
+            
+            if (!forcedParticipant) {
+                throw new ForbiddenError('此比赛启用了IP控制，只有被管理员添加的用户才能参加');
+            }
+        }
+    });
+
+    // 定时任务：清理过期的登录状态
+    setTimeout(async () => {
+        setInterval(async () => {
+            try {
+                // 获取所有启用IP控制的比赛
+                const ipControlContests = await ipControlModel.getIPControlContests();
+                
+                for (const { contestId, setting } of ipControlContests) {
+                    const inLockPeriod = await ipControlModel.isContestInLockPeriod(contestId);
+                    
+                    if (inLockPeriod) {
+                        // 在锁定期内，清除所有参赛用户的登录状态
+                        const participants = await db.collection('document.status').find({
+                            docType: 30,
+                            docId: contestId,
+                            attend: 1
+                        }).toArray();
+                        
+                        for (const participant of participants) {
+                            await ipControlModel.clearUserTokens(participant.uid);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('IP控制定时任务执行失败:', error);
+            }
+        }, 5 * 60 * 1000); // 每5分钟执行一次
+    }, 10000); // 10秒后开始执行
+
+    // 添加导航菜单
+    ctx.inject(['ui'], (c) => {
+        c.injectUI('Notification', 'IP控制', { type: 'info' });
+    });
 }

@@ -1,0 +1,109 @@
+{% extends "layout/basic.html" %}
+{% import "components/contest.html" as contest with context %}
+{% import "components/record.html" as record with context %}
+{% import "components/problem.html" as problem with context %}
+{% block content %}
+{{ set(UiContext, 'tdoc', tdoc) }}
+{{ set(UiContext, 'tsdoc', tsdoc) }}
+<div class="row">
+  <div class="medium-9 columns">
+    <div class="section">
+      <div class="section__header" style="align: center">
+        <h1 class="section__title">{{ tdoc.title }}</h1>
+        {% if handler.user.hasPriv(model.builtin.PRIV.PRIV_EDIT_SYSTEM) %}
+        <div class="section__tools">
+          <a href="/contest/{{ tdoc._id }}/ip-control" class="ipcontrol-manage-btn">
+            <i class="icon icon-security"></i> IP控制设置
+          </a>
+        </div>
+        {% endif %}
+      </div>
+      <div class="section__body">
+        <span class="bp5-tag bp5-large bp5-minimal problem__tag-item">{{ _(model.contest.statusText(tdoc, tsdoc)) }}</span>
+        <span class="bp5-tag bp5-large bp5-minimal problem__tag-item icon icon-award">{{ _(model.contest.RULES[tdoc.rule].TEXT) }}</span>
+        <span class="bp5-tag bp5-large bp5-minimal problem__tag-item">{{ _('Start at') }}: {{ contest.render_time(tsdoc.startAt or tdoc.beginAt) }}</span>
+        <span class="bp5-tag bp5-large bp5-minimal problem__tag-item icon icon-schedule">{{ contest.render_duration(tdoc) }} {{ _('hour(s)') }}</span>
+        <span class="bp5-tag bp5-large bp5-minimal problem__tag-item">{{ _('Host') }}: {{ user.render_inline(udict[tdoc.owner], badge=false) }}</span>
+        <span class="bp5-tag bp5-large bp5-minimal problem__tag-item icon icon-user--multiple">{{ tdoc['attend']|default(0) }}</span>
+        {% if tsdoc.attend %}
+          <span class="bp5-tag bp5-large bp5-minimal problem__tag-item icon icon-check">{{ _('Attended') }}</span>
+        {% endif %}
+        
+        {% if tdoc.userBindPermission and tdoc.userBindPermission.enabled %}
+          <span class="bp5-tag bp5-large bp5-minimal problem__tag-item ipcontrol-security-tag">
+            <i class="icon icon-security"></i> {{ _('IP Control Enabled') }}
+          </span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="section">
+      <div class="section__body typo richmedia">
+        {{ tdoc['content']|markdown|safe }}
+      {% if model.contest.isOngoing(tdoc, tsdoc) %}
+        <blockquote class="warn">
+          <p>{{ _('We will check code similarity after this contest.') }}</p>
+        </blockquote>
+      {% endif %}
+      {% if tdoc.duration %}
+        <blockquote class="note">
+          <p>{{ _('The contest is a flexible time contest. You need to complete the contest within a specified time after you attended.') }}</p>
+        </blockquote>
+      {% endif %}
+      {% if tdoc.userBindPermission and tdoc.userBindPermission.enabled %}
+        <blockquote class="warn">
+          <p><strong>{{ _('IP Control Notice') }}:</strong></p>
+          <ul>
+            <li>{{ _('This contest has IP control enabled') }}</li>
+            <li>{{ _('Login will be restricted 1 hour before the contest starts') }}</li>
+            <li>{{ _('During the contest, you must use the same IP address and browser as your first login') }}</li>
+            <li>{{ _('Any login attempt from different IP/browser will be blocked') }}</li>
+          </ul>
+        </blockquote>
+      {% endif %}
+      </div>
+    </div>
+    {% if tdoc.files.length %}
+      <div class="section">
+        <div class="section__header">
+          <h1 class="section__title">{{ _('Files') }}</h1>
+        </div>
+        {% include "partials/files.html" %}
+      </div>
+    {% endif %}
+  </div>
+  <div class="medium-3 columns">
+  {% set owner_udoc = udict[tdoc.owner] %}
+  {% include "partials/contest_sidebar.html" %}
+  </div>
+</div>
+
+<style>
+.ipcontrol-manage-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: #3aa9de;
+  color: white;
+  text-decoration: none;
+  border-radius: 4px;
+  font-size: 0.9em;
+  transition: background-color 0.2s;
+}
+
+.ipcontrol-manage-btn:hover {
+  background: #2980b9;
+  color: white;
+  text-decoration: none;
+}
+
+.ipcontrol-security-tag {
+  background: #ff7675 !important;
+  color: white !important;
+}
+
+.ipcontrol-security-tag .icon {
+  color: white;
+}
+</style>
+{% endblock %}
