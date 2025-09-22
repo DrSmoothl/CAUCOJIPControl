@@ -76,7 +76,7 @@
                                 <label for="allowedIPs">允许的IP范围（可选）</label>
                                 <textarea id="allowedIPs" name="allowedIPs" rows="4" 
                                           class="ipcontrol-textarea" 
-                                          placeholder="每行一个IP或IP段，例如：&#10;192.168.1.100&#10;10.0.0.0/24">{{ setting.allowedIPs|join('\n') if setting.allowedIPs }}</textarea>
+                                          placeholder="每行一个IP或IP段，例如：&#10;192.168.1.100&#10;10.0.0.0/24">{% if setting.allowedIPs %}{{ setting.allowedIPs|join('\n') }}{% endif %}</textarea>
                                 <p class="ipcontrol-form-help">留空表示不限制IP范围，只检查一致性</p>
                             </div>
 
@@ -192,7 +192,7 @@
                                     </td>
                                     <td class="ipcontrol-ip-cell">{{ record.firstLoginIP }}</td>
                                     <td class="ipcontrol-ua-cell" title="{{ record.firstLoginUA }}">
-                                        {{ record.firstLoginUA[:50] }}{% if record.firstLoginUA|length > 50 %}...{% endif %}
+                                        {{ record.firstLoginUA | truncate(50) }}
                                     </td>
                                     <td>{{ record.firstLoginAtFormatted }}</td>
                                     <td>{{ record.lastLoginAtFormatted }}</td>
@@ -230,7 +230,7 @@
                                 <label class="ipcontrol-form-label">用户ID列表（每行一个）:</label>
                                 <textarea name="clearUidsText" class="ipcontrol-textarea" rows="4" 
                                           placeholder="请输入用户ID，每行一个，例如：&#10;1001&#10;1002&#10;1003"
-                                          value="{{ formData.clearUidsText if formData else '' }}"></textarea>
+                                          {% if formData and formData.clearUidsText %}value="{{ formData.clearUidsText }}"{% endif %}></textarea>
                                 <p class="ipcontrol-form-help">请输入需要清除登录记录的用户ID，每行一个。清除后这些用户可以使用新设备登录比赛。</p>
                             </div>
                             <button type="submit" class="ipcontrol-btn ipcontrol-btn-warning"

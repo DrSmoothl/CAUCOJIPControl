@@ -103,7 +103,7 @@
                                         </div>
                                         <div class="ipcontrol-ua" title="{{ record.firstLoginUA }}">
                                             <i class="icon icon-computer"></i>
-                                            {{ record.firstLoginUA[:50] }}{% if record.firstLoginUA|length > 50 %}...{% endif %}
+                                            {{ record.firstLoginUA | truncate(50) }}
                                         </div>
                                     </div>
                                 </td>
@@ -139,7 +139,7 @@
                                                 {% endif %}
                                                 {% if violation.ua != record.firstLoginUA %}
                                                 <div class="ipcontrol-diff-ua" title="{{ violation.ua }}">
-                                                    UA: {{ violation.ua[:30] }}{% if violation.ua|length > 30 %}...{% endif %}
+                                                    UA: {{ violation.ua | truncate(30) }}
                                                 </div>
                                                 {% endif %}
                                             </div>
