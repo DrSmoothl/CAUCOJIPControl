@@ -60,9 +60,18 @@ async function getContest(domainId: string, contestId: any) {
     try {
       const OID = (global as any).Hydro?.db?.bson?.ObjectId;
       const oidVal = OID ? new OID(original) : original;
-      const raw = await db.collection('document').findOne({ _id: oidVal, type: documentModel.TYPE_CONTEST });
+      // 先带 type 过滤
+      let raw = await db.collection('document').findOne({ _id: oidVal, type: documentModel.TYPE_CONTEST });
+      if (!raw) {
+        // 去掉 type 再试（不同版本结构差异）
+        raw = await db.collection('document').findOne({ _id: oidVal });
+      }
+      if (!raw && typeof oidVal === 'object' && oidVal) {
+        // 试字符串形式
+        raw = await db.collection('document').findOne({ _id: original });
+      }
       if (raw) {
-        console.log('[IPControl] fallback raw _id match found');
+        console.log('[IPControl] fallback raw _id match found', { keys: Object.keys(raw), type: raw.type, docId: raw.docId, _id: raw._id?.toString?.(), title: raw.title });
         found = raw;
       } else {
         console.log('[IPControl] fallback raw _id match not found');
@@ -82,6 +91,17 @@ async function getContest(domainId: string, contestId: any) {
     }
   }
   if (!found) console.log('[IPControl] getContest not found', { domainIdStr, contestId: String(casted) });
+  if (!found && db) {
+    try {
+      const sample = await db.collection('document')
+        .find({ type: documentModel.TYPE_CONTEST })
+        .project({ _id: 1, docId: 1, title: 1 })
+        .limit(5).toArray();
+      console.log('[IPControl] contest sample (first 5)', sample.map(x => ({ _id: x._id?.toString?.(), docId: x.docId, title: x.title })));
+    } catch (e) {
+      console.log('[IPControl] sample query error', e);
+    }
+  }
   else console.log('[IPControl] getContest success', { domainIdStr, _id: found._id?.toString?.(), docId: found.docId?.toString?.(), title: found.title, beginAt: found.beginAt, endAt: found.endAt, ipControlEnabled: found.ipControlEnabled });
   return found;
 }
