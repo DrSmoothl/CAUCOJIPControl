@@ -1137,30 +1137,58 @@ export function apply(ctx: Context) {
 
     // 监听用户登录后事件 - 记录IP和检查一致性
     ctx.on('handler/after/UserLogin#post', async (that) => {
-        if (that.response.redirect && that.user) {
+        if (that.response.redirect) {
             const ip = that.request.ip;
             const ua = that.request.headers['user-agent'] || '';
-            const userId = that.user._id;
             
-            console.log(`[IP控制] 用户 ${userId} 登录后事件触发，IP: ${ip}, UA: ${ua.substring(0, 50)}...`);
+            // 从请求参数获取用户名，然后查找用户ID
+            const { uname } = that.args;
+            let userId = null;
             
-            // 检查登录一致性
-            const { allowed, reason } = await ipControlModel.checkLoginConsistency(
-                userId, ip, ua
-            );
-            
-            console.log(`[IP控制] 用户 ${userId} 登录一致性检查结果:`, { allowed, reason });
-            
-            if (!allowed) {
-                console.log(`[IP控制] 用户 ${userId} 登录一致性检查失败，清除token`);
-                // 清除登录Token，强制下线
-                await ipControlModel.clearUserTokens(userId);
-                throw new ForbiddenError(reason || '登录环境检查失败');
+            if (uname) {
+                let udoc = await UserModel.getByEmail(that.args.domainId, uname);
+                if (!udoc) {
+                    const user = await UserModel.getByUname(that.args.domainId, uname);
+                    if (user) udoc = user;
+                }
+                if (udoc) {
+                    userId = udoc._id;
+                }
             }
             
-            // 记录登录信息
-            await ipControlModel.recordUserLogin(userId, ip, ua);
-            console.log(`[IP控制] 已记录用户 ${userId} 的登录信息`);
+            // 如果还是找不到用户ID，尝试从session获取
+            if (!userId && that.session && that.session.uid) {
+                userId = that.session.uid;
+            }
+            
+            // 如果还是找不到，尝试从context获取
+            if (!userId && that.context && that.context.HydroContext && that.context.HydroContext.user) {
+                userId = that.context.HydroContext.user._id;
+            }
+            
+            console.log(`[IP控制] 用户登录后事件触发，uname: ${uname}, userId: ${userId}, IP: ${ip}, UA: ${ua.substring(0, 50)}...`);
+            
+            if (userId) {
+                // 检查登录一致性
+                const { allowed, reason } = await ipControlModel.checkLoginConsistency(
+                    userId, ip, ua
+                );
+                
+                console.log(`[IP控制] 用户 ${userId} 登录一致性检查结果:`, { allowed, reason });
+                
+                if (!allowed) {
+                    console.log(`[IP控制] 用户 ${userId} 登录一致性检查失败，清除token`);
+                    // 清除登录Token，强制下线
+                    await ipControlModel.clearUserTokens(userId);
+                    throw new ForbiddenError(reason || '登录环境检查失败');
+                }
+                
+                // 记录登录信息
+                await ipControlModel.recordUserLogin(userId, ip, ua);
+                console.log(`[IP控制] 已记录用户 ${userId} 的登录信息`);
+            } else {
+                console.log(`[IP控制] 无法获取用户ID，跳过登录后检查`);
+            }
         }
     });
 
