@@ -211,7 +211,7 @@ const ipControlModel = {
         }
 
         for (const setting of ipControlContests) {
-            // 检查比赛是否已开始但未结束
+            // 检查比赛是否在需要记录的时间范围内
             const documentColl = db.collection('document');
             let contest: any = null;
             
@@ -246,16 +246,25 @@ const ipControlModel = {
             const contestStart = new Date(contest.beginAt);
             const contestEnd = new Date(contest.endAt);
 
-            // 只在比赛进行期间记录
+            console.log(`[IP控制] recordUserLogin 时间检查:`, {
+                now: now.toISOString(),
+                contestStart: contestStart.toISOString(),
+                contestEnd: contestEnd.toISOString(),
+                shouldRecord: now >= contestStart && now <= contestEnd
+            });
+
+            // 仅在比赛进行期间记录
             if (now >= contestStart && now <= contestEnd) {
                 const existingRecord = await ipControlRecordsColl.findOne({
                     uid,
                     contestId: setting.contestId
                 });
 
+                console.log(`[IP控制] recordUserLogin 查找现有记录:`, existingRecord);
+
                 if (existingRecord) {
                     // 更新现有记录
-                    await ipControlRecordsColl.updateOne(
+                    const updateResult = await ipControlRecordsColl.updateOne(
                         { _id: existingRecord._id },
                         {
                             $set: {
@@ -266,9 +275,10 @@ const ipControlModel = {
                             }
                         }
                     );
+                    console.log(`[IP控制] recordUserLogin 更新现有记录结果:`, updateResult);
                 } else {
                     // 创建新记录
-                    await ipControlRecordsColl.insertOne({
+                    const insertResult = await ipControlRecordsColl.insertOne({
                         uid,
                         contestId: setting.contestId,
                         firstLoginIP: ip,
@@ -278,7 +288,10 @@ const ipControlModel = {
                         lastLoginAt: now,
                         violations: []
                     });
+                    console.log(`[IP控制] recordUserLogin 创建新记录结果:`, insertResult);
                 }
+            } else {
+                console.log(`[IP控制] recordUserLogin 不在记录时间范围内，跳过记录`);
             }
         }
     },
@@ -1136,10 +1149,9 @@ export function apply(ctx: Context) {
                             throw new ForbiddenError(`比赛 "${contest.title}" 开始前${setting.preContestLockMinutes || 60}分钟内禁止登录，请在比赛开始后再次登录`);
                         }
                         
-                        // 检查IP一致性 - 在比赛期间或比赛结束后24小时内都要检查
-                        const twentyFourHoursAfterEnd = new Date(contestEnd.getTime() + 24 * 60 * 60 * 1000);
-                        if (now >= contestStart && now <= twentyFourHoursAfterEnd) {
-                            console.log(`[IP控制] 比赛 ${contest.title} 期间或结束后24小时内，检查IP一致性`);
+                        // 检查IP一致性 - 仅在比赛进行期间检查
+                        if (now >= contestStart && now <= contestEnd) {
+                            console.log(`[IP控制] 比赛 ${contest.title} 进行期间，检查IP一致性`);
                             
                             // 查找用户的登录记录
                             const loginRecord = await ipControlRecordsColl.findOne({
