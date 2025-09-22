@@ -469,6 +469,64 @@ const ipControlModel = {
         return result;
     },
 
+    // 获取比赛的所有用户登录记录（供管理员查看）
+    async getContestLoginRecords(contestId: any): Promise<any[]> {
+        const records = await ipControlRecordsColl.find({
+            contestId
+        }).toArray();
+
+        const result: any[] = [];
+        for (const record of records) {
+            const user = await UserModel.getById('system', record.uid);
+            if (user) {
+                result.push({
+                    uid: record.uid,
+                    uname: user.uname,
+                    firstLoginIP: record.firstLoginIP,
+                    firstLoginUA: record.firstLoginUA,
+                    firstLoginAtFormatted: new Date(record.firstLoginAt).toLocaleString('zh-CN'),
+                    loginCount: record.loginCount,
+                    lastLoginAtFormatted: new Date(record.lastLoginAt).toLocaleString('zh-CN'),
+                    violationCount: record.violations ? record.violations.length : 0
+                });
+            }
+        }
+
+        return result;
+    },
+
+    // 删除用户的登录记录（允许换设备）
+    async clearUserLoginRecord(contestId: any, uid: number): Promise<void> {
+        await ipControlRecordsColl.deleteOne({
+            contestId,
+            uid
+        });
+    },
+
+    // 批量删除用户的登录记录
+    async clearMultipleUserLoginRecords(contestId: any, uids: number[]): Promise<{ success: number; failed: number[] }> {
+        let success = 0;
+        const failed: number[] = [];
+
+        for (const uid of uids) {
+            try {
+                const result = await ipControlRecordsColl.deleteOne({
+                    contestId,
+                    uid
+                });
+                if (result.deletedCount > 0) {
+                    success++;
+                } else {
+                    failed.push(uid);
+                }
+            } catch (error) {
+                failed.push(uid);
+            }
+        }
+
+        return { success, failed };
+    },
+
     // 移除强制参赛用户
     async removeForcedParticipant(contestId: any, uid: number): Promise<void> {
         // 移除强制参赛记录
@@ -678,6 +736,9 @@ class ContestIPControlHandler extends Handler {
         // 获取强制参赛用户列表
         const forcedParticipants = await ipControlModel.getForcedParticipants(contestId);
 
+        // 获取比赛的所有登录记录
+        const loginRecords = await ipControlModel.getContestLoginRecords(contestId);
+
         // 格式化时间信息供模板使用
         const now = new Date();
         const timeInfo = {
@@ -712,6 +773,7 @@ class ContestIPControlHandler extends Handler {
                 allowedIPs: []
             },
             forcedParticipants,
+            loginRecords,
             timeInfo,
             success: success === '1',
             message: message ? decodeURIComponent(message as string) : null
@@ -728,7 +790,9 @@ class ContestIPControlHandler extends Handler {
             strictMode, 
             allowedIPs,
             uidsText,
-            uidToRemove
+            uidToRemove,
+            clearUidsText,
+            clearUidToRemove
         } = this.request.body;
 
         if (!contestId) {
@@ -792,6 +856,50 @@ class ContestIPControlHandler extends Handler {
                 await ipControlModel.removeForcedParticipant(contestId, uid);
 
                 this.response.redirect = `/contest/${contestId}/ip-control?success=1&message=${encodeURIComponent('用户已移除')}`;
+                
+            } else if (action === 'clear_login_records') {
+                // 批量清除用户登录记录
+                if (!clearUidsText || !clearUidsText.trim()) {
+                    throw new Error('请输入用户ID列表');
+                }
+
+                const uids: number[] = [];
+                const lines = clearUidsText.trim().split('\n');
+                
+                for (const line of lines) {
+                    const uid = parseInt(line.trim());
+                    if (!isNaN(uid) && uid > 0) {
+                        uids.push(uid);
+                    }
+                }
+
+                if (uids.length === 0) {
+                    throw new Error('没有有效的用户ID');
+                }
+
+                const result = await ipControlModel.clearMultipleUserLoginRecords(contestId, uids);
+
+                let message = `成功清除 ${result.success} 个用户的登录记录`;
+                if (result.failed.length > 0) {
+                    message += `，失败 ${result.failed.length} 个：${result.failed.join(', ')}`;
+                }
+
+                this.response.redirect = `/contest/${contestId}/ip-control?success=1&message=${encodeURIComponent(message)}`;
+                
+            } else if (action === 'clear_single_record') {
+                // 清除单个用户登录记录
+                if (!clearUidToRemove) {
+                    throw new Error('请指定要清除记录的用户ID');
+                }
+
+                const uid = parseInt(clearUidToRemove);
+                if (isNaN(uid)) {
+                    throw new Error('用户ID无效');
+                }
+
+                await ipControlModel.clearUserLoginRecord(contestId, uid);
+
+                this.response.redirect = `/contest/${contestId}/ip-control?success=1&message=${encodeURIComponent('用户登录记录已清除')}`;
             }
 
         } catch (error: any) {
@@ -825,6 +933,7 @@ class ContestIPControlHandler extends Handler {
 
             const setting = await ipControlModel.getContestIPControl(contestId);
             const forcedParticipants = await ipControlModel.getForcedParticipants(contestId);
+            const loginRecords = await ipControlModel.getContestLoginRecords(contestId);
 
             // 格式化时间信息供模板使用
             const now = new Date();
@@ -857,6 +966,7 @@ class ContestIPControlHandler extends Handler {
                     allowedIPs: []
                 },
                 forcedParticipants,
+                loginRecords,
                 timeInfo,
                 error: error.message,
                 formData: this.request.body

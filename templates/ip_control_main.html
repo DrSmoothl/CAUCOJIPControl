@@ -3,12 +3,12 @@
 
 {% block content %}
 <div class="ipcontrol-main-container">
-    <div class="row">
-        <div class="medium-12 columns">
-            <div class="section">
-                <div class="section__header">
-                    <h1 class="section__title">IP控制管理</h1>
-                    <div class="section__tools">
+    <div class="ipcontrol-row">
+        <div class="ipcontrol-col-full">
+            <div class="ipcontrol-section">
+                <div class="ipcontrol-section-header">
+                    <h1 class="ipcontrol-section-title">IP控制管理</h1>
+                    <div class="ipcontrol-section-tools">
                         <a href="/contest/list" class="ipcontrol-btn ipcontrol-btn-primary">
                             <i class="icon icon-plus"></i> 设置比赛IP控制
                         </a>
@@ -29,9 +29,9 @@
             </div>
 
             {% if ipControlContests %}
-            <div class="section">
-                <div class="section__header">
-                    <h2 class="section__title">启用IP控制的比赛</h2>
+            <div class="ipcontrol-section">
+                <div class="ipcontrol-section-header">
+                    <h2 class="ipcontrol-section-title">启用IP控制的比赛</h2>
                 </div>
                 
                 <div class="ipcontrol-contest-list">
@@ -166,11 +166,50 @@
     padding: 20px;
 }
 
+/* 布局样式 */
+.ipcontrol-row {
+    display: block;
+    width: 100%;
+}
+
+.ipcontrol-col-full {
+    width: 100%;
+}
+
+.ipcontrol-section {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    overflow: hidden;
+}
+
+.ipcontrol-section-header {
+    background: #f8f9fa;
+    border-bottom: 1px solid #e0e0e0;
+    padding: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.ipcontrol-section-title {
+    margin: 0;
+    font-size: 1.5em;
+    font-weight: 600;
+    color: #333;
+}
+
+.ipcontrol-section-tools {
+    display: flex;
+    gap: 10px;
+}
+
 .ipcontrol-stats-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 20px;
-    margin: 20px 0;
+    margin: 20px;
 }
 
 .ipcontrol-stat-card {

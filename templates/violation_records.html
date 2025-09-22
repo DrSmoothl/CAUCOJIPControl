@@ -3,12 +3,12 @@
 
 {% block content %}
 <div class="ipcontrol-violations-container">
-    <div class="row">
-        <div class="medium-12 columns">
-            <div class="section">
-                <div class="section__header">
-                    <h1 class="section__title">IP控制违规记录</h1>
-                    <div class="section__tools">
+    <div class="ipcontrol-row">
+        <div class="ipcontrol-full-width">
+            <div class="ipcontrol-section">
+                <div class="ipcontrol-section-header">
+                    <h1 class="ipcontrol-section-title">IP控制违规记录</h1>
+                    <div class="ipcontrol-section-tools">
                         <a href="/ip-control" class="ipcontrol-btn ipcontrol-btn-secondary">
                             <i class="icon icon-arrow-left"></i> 返回IP控制管理
                         </a>
@@ -211,6 +211,10 @@
 </div>
 
 <style>
+.ipcontrol-full-width {
+    width: 100%;
+}
+
 .ipcontrol-violations-container {
     max-width: 1400px;
     margin: 0 auto;

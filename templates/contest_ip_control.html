@@ -3,8 +3,8 @@
 
 {% block content %}
 <div class="ipcontrol-contest-container">
-    <div class="row">
-        <div class="medium-12 columns">
+    <div class="ipcontrol-row">
+        <div class="ipcontrol-col-full">
             {% if success and message %}
             <div class="ipcontrol-alert ipcontrol-alert-success">
                 <i class="icon icon-check"></i>
@@ -19,10 +19,10 @@
             </div>
             {% endif %}
 
-            <div class="section">
-                <div class="section__header">
-                    <h1 class="section__title">{{ contest.title }} - IP控制设置</h1>
-                    <div class="section__tools">
+            <div class="ipcontrol-section">
+                <div class="ipcontrol-section-header">
+                    <h1 class="ipcontrol-section-title">{{ contest.title }} - IP控制设置</h1>
+                    <div class="ipcontrol-section-tools">
                         <a href="/contest/{{ contest._id }}" class="ipcontrol-btn ipcontrol-btn-secondary">
                             <i class="icon icon-arrow-left"></i> 返回比赛
                         </a>
@@ -162,6 +162,90 @@
                     </div>
                 </div>
 
+                <!-- 用户登录记录管理 -->
+                <div class="ipcontrol-login-records-section">
+                    <h3>用户登录记录管理</h3>
+                    <p class="ipcontrol-section-desc">管理比赛期间用户的IP和UA绑定记录，可以清除记录以允许用户更换设备。</p>
+                    
+                    {% if loginRecords %}
+                    <div class="ipcontrol-table-responsive">
+                        <table class="ipcontrol-table">
+                            <thead>
+                                <tr>
+                                    <th>用户ID</th>
+                                    <th>用户名</th>
+                                    <th>绑定IP</th>
+                                    <th>用户代理</th>
+                                    <th>首次登录</th>
+                                    <th>最后登录</th>
+                                    <th>登录次数</th>
+                                    <th>违规次数</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for record in loginRecords %}
+                                <tr>
+                                    <td>{{ record.uid }}</td>
+                                    <td>
+                                        <a href="/user/{{ record.uid }}">{{ record.uname }}</a>
+                                    </td>
+                                    <td class="ipcontrol-ip-cell">{{ record.firstLoginIP }}</td>
+                                    <td class="ipcontrol-ua-cell" title="{{ record.firstLoginUA }}">
+                                        {{ record.firstLoginUA[:50] }}{% if record.firstLoginUA|length > 50 %}...{% endif %}
+                                    </td>
+                                    <td>{{ record.firstLoginAtFormatted }}</td>
+                                    <td>{{ record.lastLoginAtFormatted }}</td>
+                                    <td>{{ record.loginCount }}</td>
+                                    <td>
+                                        {% if record.violationCount > 0 %}
+                                            <span class="ipcontrol-violation-count">{{ record.violationCount }}</span>
+                                        {% else %}
+                                            <span class="ipcontrol-no-violation">0</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <form method="post" style="display: inline;">
+                                            <input type="hidden" name="action" value="clear_single_record">
+                                            <input type="hidden" name="clearUidToRemove" value="{{ record.uid }}">
+                                            <button type="submit" class="ipcontrol-btn ipcontrol-btn-warning ipcontrol-btn-small"
+                                                    data-username="{{ record.uname }}"
+                                                    onclick="return confirm('确定要清除用户 ' + this.dataset.username + ' 的登录记录吗？用户将可以使用新设备登录。')">
+                                                <i class="icon icon-refresh"></i> 清除记录
+                                            </button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <!-- 批量清除登录记录 -->
+                    <div class="ipcontrol-batch-clear-section">
+                        <h4>批量清除登录记录</h4>
+                        <form method="post">
+                            <input type="hidden" name="action" value="clear_login_records">
+                            <div class="ipcontrol-form-group">
+                                <label class="ipcontrol-form-label">用户ID列表（每行一个）:</label>
+                                <textarea name="clearUidsText" class="ipcontrol-textarea" rows="4" 
+                                          placeholder="请输入用户ID，每行一个，例如：&#10;1001&#10;1002&#10;1003"
+                                          value="{{ formData.clearUidsText if formData else '' }}"></textarea>
+                                <p class="ipcontrol-form-help">请输入需要清除登录记录的用户ID，每行一个。清除后这些用户可以使用新设备登录比赛。</p>
+                            </div>
+                            <button type="submit" class="ipcontrol-btn ipcontrol-btn-warning"
+                                    onclick="return confirm('确定要批量清除这些用户的登录记录吗？')">
+                                <i class="icon icon-refresh"></i> 批量清除记录
+                            </button>
+                        </form>
+                    </div>
+                    {% else %}
+                    <div class="ipcontrol-empty-records">
+                        <p><i class="icon icon-info"></i> 暂无用户登录记录</p>
+                    </div>
+                    {% endif %}
+                </div>
+
                 <!-- 比赛状态信息 -->
                 <div class="ipcontrol-contest-status">
                     <div class="ipcontrol-status-card">
@@ -268,6 +352,45 @@
 
 .ipcontrol-form {
     padding: 20px;
+}
+
+/* 布局样式 */
+.ipcontrol-row {
+    display: block;
+    width: 100%;
+}
+
+.ipcontrol-col-full {
+    width: 100%;
+}
+
+.ipcontrol-section {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    overflow: hidden;
+}
+
+.ipcontrol-section-header {
+    background: #f8f9fa;
+    border-bottom: 1px solid #e0e0e0;
+    padding: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.ipcontrol-section-title {
+    margin: 0;
+    font-size: 1.5em;
+    font-weight: 600;
+    color: #333;
+}
+
+.ipcontrol-section-tools {
+    display: flex;
+    gap: 10px;
 }
 
 .ipcontrol-form-group {
@@ -515,6 +638,135 @@
 .ipcontrol-status-disabled {
     background: #ddd;
     color: #999;
+}
+
+/* 登录记录管理样式 */
+.ipcontrol-login-records-section {
+    margin-top: 30px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    padding: 20px;
+    border: 1px solid #e9ecef;
+}
+
+.ipcontrol-login-records-section h3 {
+    color: #007bff;
+    margin-bottom: 10px;
+    font-size: 1.4em;
+}
+
+.ipcontrol-section-desc {
+    color: #6c757d;
+    margin-bottom: 20px;
+    font-style: italic;
+}
+
+.ipcontrol-table-responsive {
+    overflow-x: auto;
+    margin-bottom: 20px;
+}
+
+.ipcontrol-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: white;
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.ipcontrol-table th {
+    background: #007bff;
+    color: white;
+    padding: 12px 8px;
+    text-align: left;
+    font-weight: 600;
+}
+
+.ipcontrol-table td {
+    padding: 10px 8px;
+    border-bottom: 1px solid #e9ecef;
+    vertical-align: middle;
+}
+
+.ipcontrol-table tr:hover {
+    background-color: #f8f9fa;
+}
+
+.ipcontrol-ip-cell {
+    font-family: monospace;
+    font-size: 0.9em;
+    color: #495057;
+}
+
+.ipcontrol-ua-cell {
+    max-width: 200px;
+    font-size: 0.85em;
+    color: #6c757d;
+    word-break: break-all;
+}
+
+.ipcontrol-violation-count {
+    background: #dc3545;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    font-weight: bold;
+}
+
+.ipcontrol-no-violation {
+    color: #28a745;
+    font-weight: bold;
+}
+
+.ipcontrol-btn-small {
+    padding: 4px 8px;
+    font-size: 0.8em;
+}
+
+.ipcontrol-batch-clear-section {
+    margin-top: 20px;
+    background: white;
+    padding: 20px;
+    border-radius: 6px;
+    border: 1px solid #dee2e6;
+}
+
+.ipcontrol-batch-clear-section h4 {
+    color: #dc3545;
+    margin-bottom: 15px;
+    font-size: 1.2em;
+}
+
+.ipcontrol-empty-records {
+    text-align: center;
+    padding: 40px;
+    color: #6c757d;
+}
+
+.ipcontrol-empty-records i {
+    font-size: 2em;
+    margin-bottom: 10px;
+    display: block;
+}
+
+/* 响应式样式 */
+@media (max-width: 768px) {
+    .ipcontrol-table th,
+    .ipcontrol-table td {
+        padding: 8px 4px;
+        font-size: 0.9em;
+    }
+    
+    .ipcontrol-ua-cell {
+        max-width: 120px;
+    }
+    
+    .ipcontrol-btn-small {
+        padding: 3px 6px;
+        font-size: 0.75em;
+    }
 }
 </style>
 {% endblock %}
