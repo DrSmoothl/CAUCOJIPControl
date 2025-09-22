@@ -77,8 +77,8 @@ async function listActive(domainId: string) {
   const documentColl = db.collection('document');
   const now = new Date();
   try {
-    // 只筛选已开启 ipControlEnabled 且未结束的比赛 (docType=30)
     const list = await documentColl.find({ docType: 30, ipControlEnabled: true, endAt: { $gt: now } }).toArray();
+    log('listActive contests', list.map(c => ({ id: c._id?.toString?.(), docId: c.docId?.toString?.(), beginAt: c.beginAt, endAt: c.endAt, ipControlEnabled: c.ipControlEnabled })));
     return list;
   } catch (e) { err('listActive error', e); return []; }
 }
@@ -108,29 +108,33 @@ async function shouldBlockLogin(domainId: string, uid: number) {
 
 async function verifyDuringContest(domainId: string, uid: number, ip: string, ua: string) {
   const contests = await listActive(domainId);
-  if (!contests.length) return;
+  if (!contests.length) { log('verifyDuringContest no active contests'); return; }
   const docIds = contests.map(c => c.docId).filter(id => id !== undefined);
   let attended: any[] = [];
   if (docModel && docIds.length) {
     try { attended = await docModel.getMultiStatus(domainId, docModel.TYPE_CONTEST, { uid, docId: { $in: docIds }, attend: 1 }).project({ docId: 1 }).toArray(); } catch (e) { err('getMultiStatus error', e); }
   }
-  if (!attended.length) return;
+  log('verifyDuringContest status', { uid, contests: contests.map(c => c.docId?.toString?.()), attended: attended.map(a => a.docId?.toString?.()) });
   const now = Date.now();
   for (const c of contests) {
-    const begin = new Date(c.beginAt).getTime();
-    const end = new Date(c.endAt).getTime();
-    if (now >= begin && now <= end) {
-      if (!attended.find(a => a.docId?.toString?.() === c.docId?.toString?.())) continue;
-      const key = `${c.docId}:${uid}`;
-      let rec: IpLockRecord | null = await ipLockColl.findOne({ _id: key });
-      if (!rec) {
-        rec = { _id: key, contestId: c.docId, uid, ip, ua, createdAt: new Date(), updatedAt: new Date() };
-        await ipLockColl.insertOne(rec);
-        log('bind first login', { contest: c.docId?.toString?.(), uid, ip, ua });
-      } else if (rec.ip !== ip || rec.ua !== ua) {
-        log('reject ip/ua change', { contest: c.docId?.toString?.(), uid, oldIp: rec.ip, newIp: ip, oldUa: rec.ua, newUa: ua });
-        throw new ForbiddenError('IP/UA 与首次登录不一致，比赛已启用 IP 控制');
-      }
+    const beginTs = new Date(c.beginAt).getTime();
+    const endTs = new Date(c.endAt).getTime();
+    const inWindow = now >= beginTs && now <= endTs;
+    log('contestCheck', { docId: c.docId?.toString?.(), beginTs, endTs, now, inWindow });
+    if (!inWindow) continue;
+    const isAttended = attended.find(a => a.docId?.toString?.() === c.docId?.toString?.());
+    if (!isAttended) { log('skip lock (not attended)', { uid, contest: c.docId?.toString?.() }); continue; }
+    const key = `${c.docId}:${uid}`;
+    let rec: IpLockRecord | null = await ipLockColl.findOne({ _id: key });
+    if (!rec) {
+      const newRec: IpLockRecord = { _id: key, contestId: c.docId, uid, ip, ua, createdAt: new Date(), updatedAt: new Date() };
+      try { await ipLockColl.insertOne(newRec); log('lock inserted', { key, ip, ua }); } catch (e) { err('lock insert failed', e); }
+    } else if (rec.ip !== ip || rec.ua !== ua) {
+      log('reject ip/ua change', { contest: c.docId?.toString?.(), uid, oldIp: rec.ip, newIp: ip, oldUa: rec.ua, newUa: ua });
+      throw new ForbiddenError('IP/UA 与首次登录不一致，比赛已启用 IP 控制');
+    } else {
+      // 可更新触发时间
+      try { await ipLockColl.updateOne({ _id: key }, { $set: { updatedAt: new Date() } }); } catch {/* ignore */}
     }
   }
 }
