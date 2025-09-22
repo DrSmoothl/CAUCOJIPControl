@@ -159,13 +159,15 @@ class ManageHandler extends Handler {
     const { action } = this.request.body;
     if (action === 'toggle') {
       const enable = this.request.body.enabled === 'true';
+      let modelOk = false; let directOk = false; let matched = 0; let modified = 0;
       if (docModel && contest.docId !== undefined) {
-        await docModel.set(domainIdParam, docModel.TYPE_CONTEST, contest.docId, { ipControlEnabled: enable } as any);
-      } else {
-        // 直接更新底层 document 集合（不推荐，但保持行为）
-        try { await db.collection('document').updateOne({ _id: contest._id }, { $set: { ipControlEnabled: enable } }); } catch (e) { err('direct update ipControlEnabled failed', e); }
+        try { await docModel.set(domainIdParam, docModel.TYPE_CONTEST, contest.docId, { ipControlEnabled: enable } as any); modelOk = true; } catch (e) { warn('docModel.set failed', e); }
       }
-      log('toggle', { contest: contest.docId, enable });
+      try {
+        const res = await db.collection('document').updateOne({ _id: contest._id }, { $set: { ipControlEnabled: enable } });
+        matched = res.matchedCount || 0; modified = res.modifiedCount || 0; directOk = modified > 0 || matched > 0;
+      } catch (e) { err('direct update ipControlEnabled failed', e); }
+      log('toggle', { contest: contest.docId, enable, modelOk, directOk, matched, modified });
       this.response.redirect = `/contest/${contestId}/ipcontrol`;
       return;
     }
