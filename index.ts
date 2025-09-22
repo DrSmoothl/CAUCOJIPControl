@@ -8,9 +8,6 @@ const ipControlSettingsColl = db.collection('ip_control_settings');
 const ipControlRecordsColl = db.collection('ip_control_records');
 const contestParticipantsColl = db.collection('contest_participants');
 
-// 临时存储期望登录的用户信息，用于验证
-const expectedLoginUsers = new Map<string, {expectedUserId: number, timestamp: number}>();
-
 // 接口定义
 interface IPControlSetting {
     _id?: any;
@@ -1091,14 +1088,6 @@ export function apply(ctx: Context) {
         if (udoc) {
             console.log(`[IP控制] 找到用户信息: ${udoc._id}, uname: ${udoc.uname}, email: ${udoc.mail}`);
             
-            // 记录期望登录的用户ID，使用IP作为唯一标识
-            const clientIP = that.request.ip;
-            expectedLoginUsers.set(clientIP, {
-                expectedUserId: udoc._id,
-                timestamp: Date.now()
-            });
-            console.log(`[IP控制] 记录期望登录用户ID: ${udoc._id} (IP: ${clientIP})`);
-            
             // 检查用户是否参加了任何启用IP控制的比赛
             const userParticipatedContests = await db.collection('document.status').find({
                 uid: udoc._id,
@@ -1143,79 +1132,6 @@ export function apply(ctx: Context) {
             console.log(`[IP控制] 用户 ${udoc._id} 登录前检查通过`);
         } else {
             console.log(`[IP控制] 未找到用户 ${uname}`);
-        }
-    });
-
-    // 监听用户登录后事件 - 记录IP和检查一致性
-    ctx.on('handler/after/UserLogin#post', async (that) => {
-        if (that.response.redirect && that.user) {
-            const ip = that.request.ip;
-            const ua = that.request.headers['user-agent'] || '';
-            
-            console.log(`[IP控制] 登录后用户对象:`, that.user);
-            console.log(`[IP控制] that.user._id:`, that.user._id);
-            console.log(`[IP控制] that.user.id:`, that.user.id);
-            console.log(`[IP控制] Object.keys(that.user):`, Object.keys(that.user));
-            
-            // 处理用户ID，0也是有效的用户ID
-            const userId = that.user._id !== undefined ? that.user._id : that.user.id;
-            
-            // 通过UserModel验证登录后的用户信息
-            try {
-                const userFromDB = await UserModel.getById(that.args?.domainId || 'system', userId);
-                if (userFromDB) {
-                    console.log(`[IP控制] 通过UserModel验证用户 ${userId}:`, {
-                        _id: userFromDB._id,
-                        uname: userFromDB.uname,
-                        email: userFromDB.mail
-                    });
-                } else {
-                    console.log(`[IP控制] UserModel无法找到用户 ${userId}`);
-                }
-                
-                // 检查是否登录了期望的用户
-                const clientIP = that.request.ip;
-                const expectedUser = expectedLoginUsers.get(clientIP);
-                if (expectedUser) {
-                    console.log(`[IP控制] 期望登录用户ID: ${expectedUser.expectedUserId}, 实际登录用户ID: ${userId}`);
-                    if (expectedUser.expectedUserId !== userId) {
-                        console.warn(`[IP控制] 警告：登录用户不匹配！期望: ${expectedUser.expectedUserId}, 实际: ${userId}`);
-                        
-                        // 如果实际登录的是访客用户(0)，可能是登录失败了
-                        if (userId === 0) {
-                            console.error(`[IP控制] 登录可能失败，退回到访客用户！`);
-                        }
-                    } else {
-                        console.log(`[IP控制] 用户登录验证成功！`);
-                    }
-                    
-                    // 清理过期的记录
-                    expectedLoginUsers.delete(clientIP);
-                } else {
-                    console.log(`[IP控制] 未找到此IP的期望登录用户记录`);
-                }
-            } catch (error) {
-                console.error(`[IP控制] UserModel查询用户 ${userId} 失败:`, error);
-            }
-            console.log(`[IP控制] 用户 ${userId} 登录成功，IP: ${ip}, UA: ${ua.substring(0, 50)}...`);
-            
-            // 检查登录一致性
-            const { allowed, reason } = await ipControlModel.checkLoginConsistency(
-                userId, ip, ua
-            );
-            
-            console.log(`[IP控制] 用户 ${userId} 登录一致性检查结果:`, { allowed, reason });
-            
-            if (!allowed) {
-                console.log(`[IP控制] 用户 ${userId} 登录一致性检查失败，清除token`);
-                // 清除登录Token，强制下线
-                await ipControlModel.clearUserTokens(userId);
-                throw new ForbiddenError(reason || '登录环境检查失败');
-            }
-            
-            // 记录登录信息
-            await ipControlModel.recordUserLogin(userId, ip, ua);
-            console.log(`[IP控制] 已记录用户 ${userId} 的登录信息`);
         }
     });
 
