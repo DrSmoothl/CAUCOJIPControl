@@ -136,7 +136,7 @@
                                             <td>
                                                 <a href="/user/{{ participant.uid }}">{{ participant.uname }}</a>
                                             </td>
-                                            <td>{{ new Date(participant.addedAt).toLocaleString('zh-CN') }}</td>
+                                            <td>{{ participant.addedAtFormatted }}</td>
                                             <td>
                                                 <form method="post" style="display: inline;">
                                                     <input type="hidden" name="action" value="remove_participant">

@@ -460,6 +460,7 @@ const ipControlModel = {
                     uid: participant.uid,
                     uname: user.uname,
                     addedAt: participant.addedAt,
+                    addedAtFormatted: new Date(participant.addedAt).toLocaleString('zh-CN'),
                     addedBy: participant.addedBy
                 });
             }
@@ -526,6 +527,19 @@ const ipControlModel = {
                 docType: 30
             });
             (record as any).contest = contest ? { _id: contest._id, title: contest.title } : null;
+            
+            // 格式化时间数据
+            (record as any).firstLoginAtFormatted = new Date(record.firstLoginAt).toLocaleString('zh-CN');
+            (record as any).lastLoginAtFormatted = new Date(record.lastLoginAt).toLocaleString('zh-CN');
+            
+            // 格式化违规记录中的时间
+            if (record.violations && record.violations.length > 0) {
+                (record as any).violations = record.violations.map((violation: any) => ({
+                    ...violation,
+                    timestampFormatted: new Date(violation.timestamp).toLocaleString('zh-CN')
+                }));
+                (record as any).lastViolationFormatted = new Date(record.violations[record.violations.length - 1].timestamp).toLocaleString('zh-CN');
+            }
         }
 
         return {
@@ -582,7 +596,9 @@ const ipControlModel = {
                     contestId: setting.contestId,
                     title: contest.title,
                     beginAt: contest.beginAt,
+                    beginAtFormatted: new Date(contest.beginAt).toLocaleString('zh-CN'),
                     endAt: contest.endAt,
+                    endAtFormatted: new Date(contest.endAt).toLocaleString('zh-CN'),
                     setting
                 });
             }

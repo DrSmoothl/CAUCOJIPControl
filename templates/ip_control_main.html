@@ -43,8 +43,8 @@
                             </h3>
                             <div class="ipcontrol-contest-status">
                                 {% set now = Date.now() %}
-                                {% set startTime = new Date(contest.beginAt).getTime() %}
-                                {% set endTime = new Date(contest.endAt).getTime() %}
+                                {% set startTime = contest.beginAt.getTime() %}
+                                {% set endTime = contest.endAt.getTime() %}
                                 
                                 {% if now < startTime %}
                                     <span class="ipcontrol-status ipcontrol-status-pending">未开始</span>
@@ -58,10 +58,10 @@
                         
                         <div class="ipcontrol-contest-info">
                             <div class="ipcontrol-info-item">
-                                <strong>开始时间:</strong> {{ new Date(contest.beginAt).toLocaleString('zh-CN') }}
+                                <strong>开始时间:</strong> {{ contest.beginAtFormatted }}
                             </div>
                             <div class="ipcontrol-info-item">
-                                <strong>结束时间:</strong> {{ new Date(contest.endAt).toLocaleString('zh-CN') }}
+                                <strong>结束时间:</strong> {{ contest.endAtFormatted }}
                             </div>
                             <div class="ipcontrol-info-item">
                                 <strong>锁定时间:</strong> 比赛开始前 {{ contest.setting.preContestLockMinutes }} 分钟
@@ -130,7 +130,7 @@
                                 </td>
                                 <td>
                                     {% if record.violations|length > 0 %}
-                                        {{ new Date(record.violations|last.timestamp).toLocaleDateString('zh-CN') + ' ' + new Date(record.violations|last.timestamp).toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'}) }}
+                                        {{ record.lastViolationFormatted }}
                                     {% endif %}
                                 </td>
                             </tr>

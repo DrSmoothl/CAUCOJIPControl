@@ -99,7 +99,7 @@
                                         </div>
                                         <div class="ipcontrol-time">
                                             <i class="icon icon-clock"></i>
-                                            {{ new Date(record.firstLoginAt).toLocaleDateString('zh-CN') + ' ' + new Date(record.firstLoginAt).toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'}) }}
+                                            {{ record.firstLoginAtFormatted }}
                                         </div>
                                         <div class="ipcontrol-ua" title="{{ record.firstLoginUA }}">
                                             <i class="icon icon-computer"></i>
@@ -125,7 +125,7 @@
                                         <div class="ipcontrol-violation-item">
                                             <div class="ipcontrol-violation-header">
                                                 <span class="ipcontrol-violation-time">
-                                                    {{ new Date(violation.timestamp).toLocaleDateString('zh-CN') + ' ' + new Date(violation.timestamp).toLocaleTimeString('zh-CN') }}
+                                                    {{ violation.timestampFormatted }}
                                                 </span>
                                                 {% if violation.blocked %}
                                                 <span class="ipcontrol-badge ipcontrol-badge-danger">已阻止</span>
@@ -156,7 +156,7 @@
                                 
                                 <td>
                                     <div class="ipcontrol-last-activity">
-                                        {{ new Date(record.lastLoginAt).toLocaleString('zh-CN') }}
+                                        {{ record.lastLoginAtFormatted }}
                                     </div>
                                 </td>
                             </tr>
