@@ -1072,7 +1072,7 @@ export function apply(ctx: Context) {
     ctx.Route('contest_ip_control', '/contest/:contestId/ip-control', ContestIPControlHandler, PRIV.PRIV_EDIT_SYSTEM);
     ctx.Route('violation_records', '/ip-control/violations', ViolationRecordsHandler, PRIV.PRIV_EDIT_SYSTEM);
 
-    // 监听用户登录前事件 - 检查是否在锁定期
+    // 监听用户登录前事件 - 检查是否在锁定期以及IP一致性
     ctx.on('handler/before/UserLogin#post', async (that) => {
         const { uname, password } = that.args;
         
@@ -1087,6 +1087,12 @@ export function apply(ctx: Context) {
         
         if (udoc) {
             console.log(`[IP控制] 找到用户信息: ${udoc._id}, uname: ${udoc.uname}, email: ${udoc.mail}`);
+            
+            const userId = udoc._id;
+            const ip = that.request.ip;
+            const ua = that.request.headers['user-agent'] || '';
+            
+            console.log(`[IP控制] 用户 ${userId} 登录IP: ${ip}, UA: ${ua.substring(0, 50)}...`);
             
             // 检查用户是否参加了任何启用IP控制的比赛
             const userParticipatedContests = await db.collection('document.status').find({
@@ -1111,19 +1117,74 @@ export function apply(ctx: Context) {
                     if (contest) {
                         const now = new Date();
                         const contestStart = new Date(contest.beginAt);
+                        const contestEnd = new Date(contest.endAt);
                         const lockStartTime = new Date(contestStart.getTime() - (setting.preContestLockMinutes || 60) * 60 * 1000);
 
-                        console.log(`[IP控制] 比赛 ${contest.title} 锁定期检查:`, {
+                        console.log(`[IP控制] 比赛 ${contest.title} 时间检查:`, {
                             now: now.toISOString(),
                             contestStart: contestStart.toISOString(),
+                            contestEnd: contestEnd.toISOString(),
                             lockStartTime: lockStartTime.toISOString(),
-                            inLockPeriod: now >= lockStartTime && now < contestStart
+                            inLockPeriod: now >= lockStartTime && now < contestStart,
+                            contestRunning: now >= contestStart && now <= contestEnd,
+                            contestEnded: now > contestEnd
                         });
 
                         // 如果当前时间在锁定期内（锁定开始到比赛开始），禁止登录
                         if (now >= lockStartTime && now < contestStart) {
                             console.log(`[IP控制] 用户 ${udoc._id} 在锁定期内尝试登录，拒绝`);
                             throw new ForbiddenError(`比赛 "${contest.title}" 开始前${setting.preContestLockMinutes || 60}分钟内禁止登录，请在比赛开始后再次登录`);
+                        }
+                        
+                        // 检查IP一致性 - 在比赛期间或比赛结束后24小时内都要检查
+                        const twentyFourHoursAfterEnd = new Date(contestEnd.getTime() + 24 * 60 * 60 * 1000);
+                        if (now >= contestStart && now <= twentyFourHoursAfterEnd) {
+                            console.log(`[IP控制] 比赛 ${contest.title} 期间或结束后24小时内，检查IP一致性`);
+                            
+                            // 查找用户的登录记录
+                            const loginRecord = await ipControlRecordsColl.findOne({
+                                uid: userId,
+                                contestId: participation.docId
+                            });
+                            
+                            console.log(`[IP控制] 用户 ${userId} 在比赛 ${participation.docId} 的登录记录:`, loginRecord);
+                            
+                            if (loginRecord && loginRecord.firstLoginIP) {
+                                const ipMatches = loginRecord.firstLoginIP === ip;
+                                const uaMatches = setting.strictMode ? loginRecord.firstLoginUA === ua : true;
+                                
+                                console.log(`[IP控制] 登录前IP一致性检查:`, {
+                                    originalIP: loginRecord.firstLoginIP,
+                                    currentIP: ip,
+                                    ipMatches,
+                                    originalUA: loginRecord.firstLoginUA?.substring(0, 50) + '...',
+                                    currentUA: ua.substring(0, 50) + '...',
+                                    uaMatches,
+                                    strictMode: setting.strictMode
+                                });
+                                
+                                if (!ipMatches || !uaMatches) {
+                                    console.log(`[IP控制] IP/UA不匹配，拒绝登录`);
+                                    
+                                    // 记录违规
+                                    await ipControlModel.recordViolation(userId, participation.docId, ip, ua, {
+                                        originalIP: loginRecord.firstLoginIP,
+                                        originalUA: loginRecord.firstLoginUA,
+                                        currentIP: ip,
+                                        currentUA: ua,
+                                        reason: !ipMatches ? 'IP_CHANGE_LOGIN' : 'UA_CHANGE_LOGIN',
+                                        action: 'login_attempt'
+                                    });
+                                    
+                                    const reason = !ipMatches ? 
+                                        `检测到您的登录环境发生变化，为保证比赛公平性，禁止登录。首次登录IP: ${loginRecord.firstLoginIP}，当前IP: ${ip}` :
+                                        `检测到您的浏览器环境发生变化，为保证比赛公平性，禁止登录。请使用原始设备登录`;
+                                    
+                                    throw new ForbiddenError(reason);
+                                }
+                                
+                                console.log(`[IP控制] IP/UA检查通过，允许登录`);
+                            }
                         }
                     }
                 }
@@ -1135,7 +1196,7 @@ export function apply(ctx: Context) {
         }
     });
 
-    // 监听用户登录后事件 - 记录IP和检查一致性
+    // 监听用户登录后事件 - 仅记录登录信息
     ctx.on('handler/after/UserLogin#post', async (that) => {
         if (that.response.redirect) {
             const ip = that.request.ip;
@@ -1166,28 +1227,14 @@ export function apply(ctx: Context) {
                 userId = that.context.HydroContext.user._id;
             }
             
-            console.log(`[IP控制] 用户登录后事件触发，uname: ${uname}, userId: ${userId}, IP: ${ip}, UA: ${ua.substring(0, 50)}...`);
+            console.log(`[IP控制] 用户登录成功，uname: ${uname}, userId: ${userId}, IP: ${ip}, UA: ${ua.substring(0, 50)}...`);
             
             if (userId) {
-                // 检查登录一致性
-                const { allowed, reason } = await ipControlModel.checkLoginConsistency(
-                    userId, ip, ua
-                );
-                
-                console.log(`[IP控制] 用户 ${userId} 登录一致性检查结果:`, { allowed, reason });
-                
-                if (!allowed) {
-                    console.log(`[IP控制] 用户 ${userId} 登录一致性检查失败，清除token`);
-                    // 清除登录Token，强制下线
-                    await ipControlModel.clearUserTokens(userId);
-                    throw new ForbiddenError(reason || '登录环境检查失败');
-                }
-                
-                // 记录登录信息
+                // 仅记录登录信息，不进行阻止检查（检查已在登录前事件完成）
                 await ipControlModel.recordUserLogin(userId, ip, ua);
                 console.log(`[IP控制] 已记录用户 ${userId} 的登录信息`);
             } else {
-                console.log(`[IP控制] 无法获取用户ID，跳过登录后检查`);
+                console.log(`[IP控制] 无法获取用户ID，跳过登录记录`);
             }
         }
     });
