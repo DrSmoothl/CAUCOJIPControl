@@ -42,13 +42,13 @@
                                 <a href="/contest/{{ contest.contestId }}">{{ contest.title }}</a>
                             </h3>
                             <div class="ipcontrol-contest-status">
-                                {% set now = moment() %}
-                                {% set start = moment(contest.beginAt) %}
-                                {% set end = moment(contest.endAt) %}
+                                {% set now = Date.now() %}
+                                {% set startTime = new Date(contest.beginAt).getTime() %}
+                                {% set endTime = new Date(contest.endAt).getTime() %}
                                 
-                                {% if now < start %}
+                                {% if now < startTime %}
                                     <span class="ipcontrol-status ipcontrol-status-pending">未开始</span>
-                                {% elif now >= start and now <= end %}
+                                {% elif now >= startTime and now <= endTime %}
                                     <span class="ipcontrol-status ipcontrol-status-running">进行中</span>
                                 {% else %}
                                     <span class="ipcontrol-status ipcontrol-status-ended">已结束</span>
@@ -58,10 +58,10 @@
                         
                         <div class="ipcontrol-contest-info">
                             <div class="ipcontrol-info-item">
-                                <strong>开始时间:</strong> {{ moment(contest.beginAt).format('YYYY-MM-DD HH:mm:ss') }}
+                                <strong>开始时间:</strong> {{ new Date(contest.beginAt).toLocaleString('zh-CN') }}
                             </div>
                             <div class="ipcontrol-info-item">
-                                <strong>结束时间:</strong> {{ moment(contest.endAt).format('YYYY-MM-DD HH:mm:ss') }}
+                                <strong>结束时间:</strong> {{ new Date(contest.endAt).toLocaleString('zh-CN') }}
                             </div>
                             <div class="ipcontrol-info-item">
                                 <strong>锁定时间:</strong> 比赛开始前 {{ contest.setting.preContestLockMinutes }} 分钟
@@ -130,7 +130,7 @@
                                 </td>
                                 <td>
                                     {% if record.violations|length > 0 %}
-                                        {{ moment(record.violations|last.timestamp).format('MM-DD HH:mm') }}
+                                        {{ new Date(record.violations|last.timestamp).toLocaleDateString('zh-CN') + ' ' + new Date(record.violations|last.timestamp).toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'}) }}
                                     {% endif %}
                                 </td>
                             </tr>

@@ -1,5 +1,5 @@
 {
-  "name": "ip-control-plugin",
+  "name": "hydrooj-ip-control",
   "version": "1.0.0",
   "description": "Hydro IP控制插件，支持比赛IP控制和用户强制参赛功能",
   "main": "index.ts",
@@ -13,13 +13,13 @@
     "contest"
   ],
   "author": "DrSmoothl",
-  "license": "AGPL-3.0-only",
+  "license": "AGPL-3.0",
   "packageManager": "pnpm@10.12.4",
   "devDependencies": {
-    "hydrooj": "5.0.0-beta.5",
     "@types/node": "^20.0.0"
   },
   "dependencies": {
+    "hydrooj": "5.0.0-beta.5",
     "mongodb": "^6.18.0"
   }
 }
