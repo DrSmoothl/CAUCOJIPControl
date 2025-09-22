@@ -3,6 +3,7 @@ import { Context, Handler, PRIV, ForbiddenError, TokenModel, UserModel } from 'h
 // 延迟初始化引用
 let documentModel: any; // 在 apply 中赋值
 let ipLockColl: any;    // 在 apply 中赋值
+let db: any;            // 保存 ctx.db 引用用于回退原始查询
 let ipLockIndexesEnsured = false;
 
 // 简单日志（通过环境变量 IPCONTROL_LOG 启用）
@@ -53,6 +54,32 @@ async function getContest(domainId: string, contestId: any) {
   if (!found && casted !== original) {
     console.log('[IPControl] retry with original id (cast differed)');
     found = await documentModel.get(domainIdStr, documentModel.TYPE_CONTEST, original);
+  }
+  // 回退 1：直接在 document 集合按 _id 查找 (hex 24)
+  if (!found && typeof original === 'string' && /^[0-9a-fA-F]{24}$/.test(original) && db) {
+    try {
+      const OID = (global as any).Hydro?.db?.bson?.ObjectId;
+      const oidVal = OID ? new OID(original) : original;
+      const raw = await db.collection('document').findOne({ _id: oidVal, type: documentModel.TYPE_CONTEST });
+      if (raw) {
+        console.log('[IPControl] fallback raw _id match found');
+        found = raw;
+      } else {
+        console.log('[IPControl] fallback raw _id match not found');
+      }
+    } catch (e) {
+      console.log('[IPControl] fallback raw _id query error', e);
+    }
+  }
+  // 回退 2：若 id 是纯数字，尝试数字 docId
+  if (!found && typeof original === 'string' && /^\d+$/.test(original)) {
+    const numId = Number(original);
+    try {
+      console.log('[IPControl] retry numeric docId', numId);
+      found = await documentModel.get(domainIdStr, documentModel.TYPE_CONTEST, numId);
+    } catch (e) {
+      console.log('[IPControl] numeric docId query error', e);
+    }
   }
   if (!found) console.log('[IPControl] getContest not found', { domainIdStr, contestId: String(casted) });
   else console.log('[IPControl] getContest success', { domainIdStr, _id: found._id?.toString?.(), docId: found.docId?.toString?.(), title: found.title, beginAt: found.beginAt, endAt: found.endAt, ipControlEnabled: found.ipControlEnabled });
@@ -180,6 +207,7 @@ export async function apply(ctx: Context) {
     ipLockColl = ctx.db.collection('ipcontrol_login');
   console.log('[IPControl] ipLock collection ready');
   }
+  if (!db) db = ctx.db;
   if (!ipLockIndexesEnsured) {
     try {
       await ctx.db.ensureIndexes(
