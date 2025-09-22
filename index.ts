@@ -1074,9 +1074,9 @@ export function apply(ctx: Context) {
 
     // 监听用户登录前事件 - 检查是否在锁定期
     ctx.on('handler/before/UserLogin#post', async (that) => {
-        const { uname } = that.args;
+        const { uname, password } = that.args;
         
-        console.log(`[IP控制] 用户 ${uname} 尝试登录`);
+        console.log(`[IP控制] 用户 ${uname} 尝试登录, args:`, that.args);
         
         // 获取用户信息
         let udoc = await UserModel.getByEmail(that.args.domainId, uname);
@@ -1086,7 +1086,7 @@ export function apply(ctx: Context) {
         }
         
         if (udoc) {
-            console.log(`[IP控制] 找到用户信息: ${udoc._id}`);
+            console.log(`[IP控制] 找到用户信息: ${udoc._id}, uname: ${udoc.uname}, email: ${udoc.mail}`);
             
             // 检查用户是否参加了任何启用IP控制的比赛
             const userParticipatedContests = await db.collection('document.status').find({
@@ -1146,7 +1146,8 @@ export function apply(ctx: Context) {
             console.log(`[IP控制] that.user.id:`, that.user.id);
             console.log(`[IP控制] Object.keys(that.user):`, Object.keys(that.user));
             
-            const userId = that.user._id || that.user.id;
+            // 处理用户ID，0也是有效的用户ID
+            const userId = that.user._id !== undefined ? that.user._id : that.user.id;
             console.log(`[IP控制] 用户 ${userId} 登录成功，IP: ${ip}, UA: ${ua.substring(0, 50)}...`);
             
             // 检查登录一致性
