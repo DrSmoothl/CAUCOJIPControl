@@ -384,8 +384,10 @@ const ipControlModel = {
             if (now >= contestStart && now <= contestEnd) {
                 const record = await ipControlRecordsColl.findOne({
                     uid,
-                    contestId: setting.contestId
+                    contestId: setting.contestId.toString()
                 });
+
+                console.log(`[IP控制] checkLoginConsistency 查询记录: uid=${uid}, contestId=${setting.contestId}, 结果:`, record);
 
                 if (record) {
                     const ipMatches = record.firstLoginIP === ip;
@@ -1156,7 +1158,7 @@ export function apply(ctx: Context) {
                             // 查找用户的登录记录
                             const loginRecord = await ipControlRecordsColl.findOne({
                                 uid: userId,
-                                contestId: participation.docId
+                                contestId: participation.docId.toString()
                             });
                             
                             console.log(`[IP控制] 用户 ${userId} 在比赛 ${participation.docId} 的登录记录:`, loginRecord);
