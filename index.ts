@@ -50,26 +50,40 @@ async function fetchContest(_domainIdInput: string | any, contestId: any) {
   if (!db) return null;
   const documentColl = db.collection('document');
   let contest: any = null;
+  const idStr = contestId?.toString?.();
+  const attempts: any = { contestId: idStr };
   try {
     contest = await documentColl.findOne({ _id: contestId, docType: 30 });
-    if (contest) {
-      log('fetchContest direct match', { _id: contest._id?.toString?.(), docId: contest.docId });
-      return contest;
-    }
-  } catch (e) {
-    warn('fetchContest direct query error', e);
+    if (contest) { attempts.direct = 'hit'; log('fetchContest direct match', { _id: contest._id?.toString?.(), docId: contest.docId }); return contest; }
+    attempts.direct = 'miss';
+  } catch (e) { attempts.direct = 'err'; attempts.directErr = (e as any)?.message; }
+  // 按 _id 转字符串再试（如果传入是 ObjectId）
+  if (!contest && idStr && contestId && contestId._bsontype === 'ObjectID') {
+    try {
+      contest = await documentColl.findOne({ _id: idStr, docType: 30 });
+      if (contest) { attempts.directString = 'hit'; log('fetchContest direct string match', { _id: contest._id?.toString?.(), docId: contest.docId }); return contest; }
+      attempts.directString = 'miss';
+    } catch (e) { attempts.directString = 'err'; attempts.directStringErr = (e as any)?.message; }
   }
+  // 按 docId 字段（数据库里 docId 为 ObjectId 的情况）
+  if (!contest && idStr && /^[0-9a-fA-F]{24}$/.test(idStr)) {
+    try {
+      const OID = (global as any).Hydro?.db?.bson?.ObjectId;
+      const oid = OID ? new OID(idStr) : idStr;
+      contest = await documentColl.findOne({ docId: oid, docType: 30 });
+      if (contest) { attempts.byDocIdField = 'hit'; log('fetchContest docId field match', { _id: contest._id?.toString?.(), docId: contest.docId }); return contest; }
+      attempts.byDocIdField = 'miss';
+    } catch (e) { attempts.byDocIdField = 'err'; attempts.byDocIdFieldErr = (e as any)?.message; }
+  }
+  // 全表扫描 fallback
   try {
-    const all = await documentColl.find({ docType: 30 }).toArray();
-    contest = all.find(c => c._id?.toString?.() === contestId?.toString?.());
-    if (contest) {
-      log('fetchContest fallback list match', { _id: contest._id?.toString?.(), docId: contest.docId });
-      return contest;
-    }
-    warn('fetchContest not found (docType=30)', { contestId });
-  } catch (e) {
-    err('fetchContest fallback error', e);
-  }
+    const all = await documentColl.find({ docType: 30 }).project({ _id: 1, docId: 1 }).toArray();
+    attempts.scanCount = all.length;
+    contest = all.find(c => c._id?.toString?.() === idStr || c.docId?.toString?.() === idStr);
+    if (contest) { attempts.scanMatch = 'hit'; log('fetchContest fallback list match', { _id: contest._id?.toString?.(), docId: contest.docId }); return contest; }
+    attempts.scanMatch = 'miss';
+  } catch (e) { attempts.scanErr = (e as any)?.message; }
+  warn('fetchContest not found', attempts);
   return null;
 }
 
