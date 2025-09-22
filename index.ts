@@ -1135,6 +1135,35 @@ export function apply(ctx: Context) {
         }
     });
 
+    // 监听用户登录后事件 - 记录IP和检查一致性
+    ctx.on('handler/after/UserLogin#post', async (that) => {
+        if (that.response.redirect && that.user) {
+            const ip = that.request.ip;
+            const ua = that.request.headers['user-agent'] || '';
+            const userId = that.user._id;
+            
+            console.log(`[IP控制] 用户 ${userId} 登录后事件触发，IP: ${ip}, UA: ${ua.substring(0, 50)}...`);
+            
+            // 检查登录一致性
+            const { allowed, reason } = await ipControlModel.checkLoginConsistency(
+                userId, ip, ua
+            );
+            
+            console.log(`[IP控制] 用户 ${userId} 登录一致性检查结果:`, { allowed, reason });
+            
+            if (!allowed) {
+                console.log(`[IP控制] 用户 ${userId} 登录一致性检查失败，清除token`);
+                // 清除登录Token，强制下线
+                await ipControlModel.clearUserTokens(userId);
+                throw new ForbiddenError(reason || '登录环境检查失败');
+            }
+            
+            // 记录登录信息
+            await ipControlModel.recordUserLogin(userId, ip, ua);
+            console.log(`[IP控制] 已记录用户 ${userId} 的登录信息`);
+        }
+    });
+
     // 监听比赛页面访问事件 - 检查IP控制
     ctx.on('handler/before/ContestDetailHandler#get', async (that) => {
         const { tid: contestId } = that.args;
