@@ -98,8 +98,9 @@ const ipControlModel = {
 
     // 获取比赛IP控制设置
     async getContestIPControl(contestId: any): Promise<IPControlSetting | null> {
-        console.log('[IPControl] getContestIPControl: 查询比赛IP控制设置, contestId:', contestId);
-        const setting = await ipControlSettingsColl.findOne({ contestId });
+        const contestIdStr = contestId.toString();
+        console.log('[IPControl] getContestIPControl: 查询比赛IP控制设置, contestId:', contestId, 'contestIdStr:', contestIdStr);
+        const setting = await ipControlSettingsColl.findOne({ contestId: contestIdStr });
         console.log('[IPControl] getContestIPControl: 找到设置:', setting ? '是' : '否', setting);
         return setting;
     },
@@ -113,17 +114,22 @@ const ipControlModel = {
             attend: 1
         }).toArray();
 
+        console.log(`[IPControl] getUserIPControlContests: 用户 ${uid} 参加的比赛:`, userContests.map(c => c.docId));
+
         if (userContests.length === 0) {
             return [];
         }
 
-        const contestIds = userContests.map(contest => contest.docId);
+        const contestIds = userContests.map(contest => contest.docId.toString());
+        console.log(`[IPControl] getUserIPControlContests: 转换后的contestIds:`, contestIds);
         
         // 获取这些比赛中启用了IP控制的
         const ipControlContests = await ipControlSettingsColl.find({
             contestId: { $in: contestIds },
             enabled: true
         }).toArray();
+
+        console.log(`[IPControl] getUserIPControlContests: 启用IP控制的比赛:`, ipControlContests);
 
         return ipControlContests;
     },
@@ -1135,25 +1141,31 @@ export function apply(ctx: Context) {
             const ip = that.request.ip;
             const ua = that.request.headers['user-agent'] || '';
             
-            console.log(`[IP控制] 用户 ${that.user._id} 登录成功，IP: ${ip}, UA: ${ua.substring(0, 50)}...`);
+            console.log(`[IP控制] 登录后用户对象:`, that.user);
+            console.log(`[IP控制] that.user._id:`, that.user._id);
+            console.log(`[IP控制] that.user.id:`, that.user.id);
+            console.log(`[IP控制] Object.keys(that.user):`, Object.keys(that.user));
+            
+            const userId = that.user._id || that.user.id;
+            console.log(`[IP控制] 用户 ${userId} 登录成功，IP: ${ip}, UA: ${ua.substring(0, 50)}...`);
             
             // 检查登录一致性
             const { allowed, reason } = await ipControlModel.checkLoginConsistency(
-                that.user._id, ip, ua
+                userId, ip, ua
             );
             
-            console.log(`[IP控制] 用户 ${that.user._id} 登录一致性检查结果:`, { allowed, reason });
+            console.log(`[IP控制] 用户 ${userId} 登录一致性检查结果:`, { allowed, reason });
             
             if (!allowed) {
-                console.log(`[IP控制] 用户 ${that.user._id} 登录一致性检查失败，清除token`);
+                console.log(`[IP控制] 用户 ${userId} 登录一致性检查失败，清除token`);
                 // 清除登录Token，强制下线
-                await ipControlModel.clearUserTokens(that.user._id);
+                await ipControlModel.clearUserTokens(userId);
                 throw new ForbiddenError(reason || '登录环境检查失败');
             }
             
             // 记录登录信息
-            await ipControlModel.recordUserLogin(that.user._id, ip, ua);
-            console.log(`[IP控制] 已记录用户 ${that.user._id} 的登录信息`);
+            await ipControlModel.recordUserLogin(userId, ip, ua);
+            console.log(`[IP控制] 已记录用户 ${userId} 的登录信息`);
         }
     });
 
